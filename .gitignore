@@ -1,0 +1,4 @@
+*.o
+SPEK.md
+flip_cuda
+flip
