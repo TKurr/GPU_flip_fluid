@@ -4,7 +4,6 @@ flip_cuda
 flip
 
 # benchmark / profiling outputs
-plots/
 nsight/
 *.nsys-rep
 *.ncu-rep
