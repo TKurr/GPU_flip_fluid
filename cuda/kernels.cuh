@@ -345,8 +345,34 @@ __global__ void k_carveObstacle(float* s, float* u, float* v,
     }
 }
 
-// Prefix sum / scan is done with thrust::inclusive_scan in buildSpatialHash()
-// (see flip_fluid_cuda.cu) — a parallel scan primitive, not a serial kernel.
+// ── parallel inclusive scan (Hillis-Steele, 3-phase multi-block) ──
+// Phase 1: each block inclusive-scans its BLK slice into `out` and writes the
+// block total to blockSums[blockIdx]. Launch with shared mem = blockDim*4 bytes.
+__global__ void k_scanBlockInclusive(const int* in, int* out,
+                                    int* blockSums, int n) {
+    extern __shared__ int tmp[];
+    int tid = threadIdx.x;
+    int gid = blockIdx.x * blockDim.x + tid;
+    tmp[tid] = (gid < n) ? in[gid] : 0;
+    __syncthreads();
+    for (int off = 1; off < blockDim.x; off <<= 1) {
+        int add = (tid >= off) ? tmp[tid - off] : 0;
+        __syncthreads();
+        tmp[tid] += add;
+        __syncthreads();
+    }
+    if (gid < n) out[gid] = tmp[tid];
+    // Last thread holds the block's total (out-of-range lanes contributed 0).
+    if (tid == blockDim.x - 1 && blockSums) blockSums[blockIdx.x] = tmp[tid];
+}
+
+// Phase 3: add each block's exclusive offset (= inclusive-scanned blockSums of
+// the previous block) to every element of the block.
+__global__ void k_addBlockOffsets(int* out, const int* scannedBlockSums, int n) {
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= n) return;
+    if (blockIdx.x > 0) out[gid] += scannedBlockSums[blockIdx.x - 1];
+}
 
 // ── zero int array ───────────────────────────────────────────
 __global__ void k_zeroInt(int* arr, int n) {

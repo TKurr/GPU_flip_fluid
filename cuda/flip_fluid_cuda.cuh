@@ -94,6 +94,7 @@ public:
     // ── Temporary buffers for prefix sum / reduction ──
     float *d_reductionBuf;     // for computeRestDensity
     int   *d_reductionIntBuf;
+    int   *d_blockSums;        // per-block totals for the parallel scan
 
     // ── Host staging buffers (for D2H copy to render) ──
     float *h_particlePosX, *h_particlePosY;

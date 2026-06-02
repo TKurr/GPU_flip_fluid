@@ -4,9 +4,6 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
-#include <thrust/scan.h>
-#include <thrust/device_ptr.h>
-#include <thrust/execution_policy.h>
 
 #define BLK 256
 #define GRID(n) (((n)+BLK-1)/BLK)
@@ -60,6 +57,8 @@ FlipFluidCUDA::FlipFluidCUDA(float density_, float width, float height,
     // Reduction temporaries
     CUDA_CHECK(cudaMalloc(&d_reductionBuf, sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_reductionIntBuf, sizeof(int)));
+    // Scan scratch: one int per thread-block over the spatial-hash cells.
+    CUDA_CHECK(cudaMalloc(&d_blockSums, GRID(pNumCells) * sizeof(int)));
 
     // Zero everything
     CUDA_CHECK(cudaMemset(d_u, 0, fNumCells*sizeof(float)));
@@ -105,7 +104,7 @@ FlipFluidCUDA::~FlipFluidCUDA() {
     cudaFree(d_particleVelX); cudaFree(d_particleVelY);
     cudaFree(d_particleColorR); cudaFree(d_particleColorG); cudaFree(d_particleColorB);
     cudaFree(d_numCellParticles); cudaFree(d_firstCellParticle); cudaFree(d_cellParticleIds);
-    cudaFree(d_reductionBuf); cudaFree(d_reductionIntBuf);
+    cudaFree(d_reductionBuf); cudaFree(d_reductionIntBuf); cudaFree(d_blockSums);
     delete[] h_particlePosX; delete[] h_particlePosY;
     delete[] h_particleColorR; delete[] h_particleColorG; delete[] h_particleColorB;
     delete[] h_cellColor;
@@ -177,12 +176,24 @@ void FlipFluidCUDA::buildSpatialHash() {
     k_hashCount<<<GRID(numParticles),BLK>>>(d_particlePosX, d_particlePosY,
                                             numParticles, d_numCellParticles,
                                             pInvSpacing, pNumX, pNumY);
-    // Inclusive prefix sum (parallel scan via Thrust/CUB) — replaces the old
-    // single-thread kernel that serialized ~O(pNumCells) work each frame.
-    // Matches the CPU semantics: firstCellParticle[i] = sum(counts[0..i]).
-    thrust::device_ptr<int> cptr(d_numCellParticles);
-    thrust::device_ptr<int> fptr(d_firstCellParticle);
-    thrust::inclusive_scan(thrust::device, cptr, cptr + pNumCells, fptr);
+    // Inclusive prefix sum via a hand-written 3-phase parallel scan (replaces
+    // the old single-thread kernel). Matches CPU semantics:
+    // firstCellParticle[i] = sum(counts[0..i]).
+    int nBlocks = GRID(pNumCells);
+    k_scanBlockInclusive<<<nBlocks, BLK, BLK * sizeof(int)>>>(
+        d_numCellParticles, d_firstCellParticle, d_blockSums, pNumCells);
+    if (nBlocks > 1) {
+        // Scan the per-block totals in a single block, then fold them back in.
+        int tpb = 1;
+        while (tpb < nBlocks) tpb <<= 1;
+        if (tpb > 1024) {
+            fprintf(stderr, "[scan] %d blocks exceeds single-block scan limit (1024)\n", nBlocks);
+            exit(EXIT_FAILURE);
+        }
+        k_scanBlockInclusive<<<1, tpb, tpb * sizeof(int)>>>(
+            d_blockSums, d_blockSums, nullptr, nBlocks);
+        k_addBlockOffsets<<<nBlocks, BLK>>>(d_firstCellParticle, d_blockSums, pNumCells);
+    }
     // Sentinel firstCellParticle[pNumCells] = total (= last inclusive sum).
     // Never decremented by the scatter, so it stays as the end offset.
     CUDA_CHECK(cudaMemcpy(d_firstCellParticle + pNumCells,
