@@ -211,36 +211,10 @@ __global__ void k_restoreSolid(float* u, float* v, const float* pu, const float*
     if (solid || (j>0 && ct[i*n+j-1]==GSOLID))   v[i*n+j] = pv[i*n+j];
 }
 
-// ── T6: Jacobi pressure solver (one iteration) ───────────────
-__global__ void k_jacobi(float* u, float* v, float* p,
-                         const float* s, const int* ct,
-                         const float* pDens, float rest, int cd,
-                         float overRelax, float cp, int fNX, int fNY) {
-    int idx = blockIdx.x*blockDim.x+threadIdx.x;
-    int n = fNY;
-    int i = idx/n, j = idx%n;
-    if (i<1||i>=fNX-1||j<1||j>=fNY-1) return;
-    if (ct[i*n+j]!=GFLUID) return;
-    int center=i*n+j, left=(i-1)*n+j, right=(i+1)*n+j, bot=i*n+j-1, top=i*n+j+1;
-    float sx0=s[left], sx1=s[right], sy0=s[bot], sy1=s[top];
-    float sSum=sx0+sx1+sy0+sy1;
-    if (sSum==0.0f) return;
-    float div = u[right]-u[center]+v[top]-v[center];
-    if (rest>0.0f && cd) {
-        float comp = pDens[center]-rest;
-        if (comp>0.0f) div -= comp;
-    }
-    float pVal = -div/sSum * overRelax;
-    // Note: for true Jacobi we'd read from prev buffer; this is Red-Black-like
-    // Gauss-Seidel on GPU which converges similarly for this problem
-    atomicAdd(&p[center], cp*pVal);
-    atomicAdd(&u[center], -(-sx0*pVal));  // u[center] -= sx0*pVal
-    atomicAdd(&u[right],  sx1*pVal);
-    atomicAdd(&v[center], -(-sy0*pVal));  // v[center] -= sy0*pVal
-    atomicAdd(&v[top],    sy1*pVal);
-}
-
-// Simpler: direct write version (color-based won't race for same cell)
+// ── T6: Red-Black Gauss-Seidel pressure solver (one color per launch) ──
+// Red-black coloring makes each u/v/p write owned by exactly one cell per
+// launch, so the direct (non-atomic) writes below are race-free. Replaces a
+// lexicographic Gauss-Seidel sweep on the CPU; converges to the same solution.
 __global__ void k_jacobiRB(float* u, float* v, float* p,
                            const float* s, const int* ct,
                            const float* pDens, float rest, int cd,
@@ -305,22 +279,6 @@ __global__ void k_g2p(const float* px, const float* py,
 }
 
 // ── T8: particle colors ──────────────────────────────────────
-__global__ void k_particleColors(float* cr, float* cg, float* cb,
-                                 const float* px, const float* py,
-                                 const float* pDens, float d0,
-                                 float h1, int fNX, int fNY) {
-    int i = blockIdx.x*blockDim.x+threadIdx.x;
-    if (i >= fNX) return; // reused as n_particles externally
-    // Actually n is passed via fNX here - see launch
-    cr[i] = clampf_d(cr[i]-0.01f, 0, 1);
-    cg[i] = clampf_d(cg[i]-0.01f, 0, 1);
-    cb[i] = clampf_d(cb[i]+0.01f, 0, 1);
-    int xi = clampi_d((int)floorf(px[i]*h1), 1, fNY-1); // fNY is actual fNumX
-    int yi = clampi_d((int)floorf(py[i]*h1), 1, fNX-1); // fNX is actual fNumY
-    // Need proper args - see launch wrapper
-}
-
-// Better version with explicit args:
 __global__ void k_updateParticleColors(float* cr, float* cg, float* cb,
                                        const float* px, const float* py,
                                        const float* pDens, float d0,
@@ -387,17 +345,8 @@ __global__ void k_carveObstacle(float* s, float* u, float* v,
     }
 }
 
-// ── prefix sum (simple sequential on GPU for small arrays) ────
-__global__ void k_prefixSum(const int* counts, int* first, int nCells) {
-    // Single thread - fine for moderate pNumCells
-    if (threadIdx.x != 0) return;
-    int sum = 0;
-    for (int i = 0; i < nCells; i++) {
-        sum += counts[i];
-        first[i] = sum;
-    }
-    first[nCells] = sum;
-}
+// Prefix sum / scan is done with thrust::inclusive_scan in buildSpatialHash()
+// (see flip_fluid_cuda.cu) — a parallel scan primitive, not a serial kernel.
 
 // ── zero int array ───────────────────────────────────────────
 __global__ void k_zeroInt(int* arr, int n) {
@@ -429,4 +378,16 @@ __global__ void k_prepPressure(float* p, float* prevU, float* prevV,
     p[i] = 0.0f;
     prevU[i] = u[i];
     prevV[i] = v[i];
+}
+
+// ── B1 interop: pack SoA particle data straight into mapped GL VBOs ──
+// Writes into buffers owned by OpenGL (mapped via cudaGraphicsMapResources),
+// so rendering reads them with zero device→host transfer.
+__global__ void k_packParticles(const float* px, const float* py,
+                                const float* cr, const float* cg, const float* cb,
+                                float2* outPos, float3* outCol, int n) {
+    int i = blockIdx.x*blockDim.x+threadIdx.x;
+    if (i >= n) return;
+    outPos[i] = make_float2(px[i], py[i]);
+    outCol[i] = make_float3(cr[i], cg[i], cb[i]);
 }

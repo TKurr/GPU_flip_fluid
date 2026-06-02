@@ -101,10 +101,17 @@ public:
     float *h_cellColor;
 
     // ── Timing ──
-    cudaEvent_t evStart[NUM_TIMING_STAGES], evStop[NUM_TIMING_STAGES];
+    // One event pair per (stage, substep) so per-stage time is summed across
+    // ALL substeps within a frame (matches the CPU accumulation). Reusing a
+    // single pair per stage would only capture the LAST substep.
+    static const int MAX_SUBSTEPS = 8;
+    cudaEvent_t evStart[NUM_TIMING_STAGES][MAX_SUBSTEPS];
+    cudaEvent_t evStop [NUM_TIMING_STAGES][MAX_SUBSTEPS];
     cudaEvent_t evFrameStart, evFrameStop;
     float  accumMs[NUM_TIMING_STAGES];
     int    accumFrames;
+    int    lastNumPressureIters;   // per-solve iterations (last frame)
+    int    lastNumSubSteps;        // substeps per frame (last frame)
 
     // ── Constructor / Destructor ──
     FlipFluidCUDA(float density, float width, float height,
@@ -140,15 +147,19 @@ public:
                   float obstacleVelX, float obstacleVelY,
                   int numSubSteps = 1);
 
-    // Copy results back to host for rendering
+    // Copy results back to host for rendering (non-interop path)
     void downloadForRender();
+
+    // B1 interop: pack particle pos/color directly into mapped GL VBO memory
+    // (float2 positions, float3 colors). No host round-trip.
+    void packParticlesToBuffers(float2* dPos, float3* dCol);
 
     // ── Obstacle carving (runs on GPU) ──
     void carveObstacle(float x, float y, float r, float vx, float vy);
 
     // ── Timing helpers ──
-    void startTiming(TimingStage stage);
-    void stopTiming(TimingStage stage);
+    void startTiming(TimingStage stage, int sub = 0);
+    void stopTiming(TimingStage stage, int sub = 0);
     void resetTiming();
     void printTiming();
 

@@ -22,6 +22,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <string>
 #include <vector>
 
 using namespace flipcpu;
@@ -290,14 +292,149 @@ static void drawObstacle(const FlipFluid& f, float ox, float oy, float orad) {
     glEnd();
 }
 
+// --------------------------- benchmark --------------------------------------
+
+// Print a single value from /proc/<file> matching a key prefix.
+static std::string procField(const char* path, const char* key) {
+    std::ifstream f(path);
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.rfind(key, 0) == 0) {
+            auto pos = line.find(':');
+            if (pos == std::string::npos) pos = line.find('=');
+            if (pos != std::string::npos) {
+                std::string v = line.substr(pos + 1);
+                size_t a = v.find_first_not_of(" \t");
+                return (a == std::string::npos) ? "" : v.substr(a);
+            }
+        }
+    }
+    return "";
+}
+
+static void printSystemInfo() {
+    std::printf("=== System Info (CPU build) ===\n");
+    std::string cpu = procField("/proc/cpuinfo", "model name");
+    std::string mem = procField("/proc/meminfo", "MemTotal");
+    std::string os  = procField("/proc/version", "Linux version");
+    std::printf("  CPU : %s\n", cpu.empty() ? "(unknown)" : cpu.c_str());
+    std::printf("  RAM : %s\n", mem.empty() ? "(unknown)" : mem.c_str());
+    std::printf("  OS  : %s\n", os.empty() ? "(unknown)" : os.c_str());
+    std::printf("  Note: fill GPU/driver/CUDA details manually in the report.\n");
+    std::printf("================================\n\n");
+}
+
+// Run one frame of sim + render (no UI panel). T9/T_total are accumulated by
+// the caller via the returned wall-clock split.
+static void benchStepAndRender(AppWindow& w, FlipFluid& f, bool record) {
+    auto frameStart = std::chrono::steady_clock::now();
+    f.simulate(scene.dt, scene.gravity, scene.flipRatio,
+               scene.numPressureIters, scene.numParticleIters,
+               scene.overRelaxation, scene.compensateDrift,
+               scene.separateParticles,
+               scene.obstacleX, scene.obstacleY, scene.obstacleRadius,
+               scene.obstacleVelX, scene.obstacleVelY,
+               scene.numSubSteps);
+    scene.frameNr++;
+
+    auto renderStart = std::chrono::steady_clock::now();
+    glClear(GL_COLOR_BUFFER_BIT);
+    setProjection(w.width, w.height);
+    if (scene.showGrid)      drawGrid(f);
+    if (scene.showParticles) drawParticles(f, w.height);
+    if (scene.showObstacle)  drawObstacle(f, scene.obstacleX, scene.obstacleY,
+                                          scene.obstacleRadius);
+    glXSwapBuffers(w.dpy, w.xwin);
+
+    if (record) {
+        auto now = std::chrono::steady_clock::now();
+        f.accumMs[T9_RENDER] += std::chrono::duration<double, std::milli>(now - renderStart).count();
+        f.accumMs[T_TOTAL]   += std::chrono::duration<double, std::milli>(now - frameStart).count();
+    }
+}
+
+static void runBenchmark(AppWindow& w, int warmup, int measure, const char* csvPath) {
+    static const int resolutions[] = {50, 100, 150, 200};
+
+    // Fixed config per assignment §4.2.
+    scene.gravity          = -9.81f;
+    scene.compensateDrift  = true;
+    scene.separateParticles = true;
+    scene.flipRatio        = 0.9f;
+    scene.showGrid         = false;
+    scene.showParticles    = true;
+    scene.showObstacle     = true;
+    scene.paused           = false;
+
+    printSystemInfo();
+
+    FILE* csv = csvPath ? std::fopen(csvPath, "w") : nullptr;
+    if (csv) {
+        std::fprintf(csv, "version,res,particles,numPressureIters,numSubSteps,"
+                     "effPressureIters,T1_integrate,T2_pushApart,T3_collisions,"
+                     "T4_p2g,T5_density,T6_pressure,T7_g2p,T8_colors,T9_render,"
+                     "T10_transfer,T_total\n");
+    }
+
+    for (int res : resolutions) {
+        if (!w.running) break;
+        scene.resolution = res;
+        setupScene();                 // rebuilds fluid; obstacle carved at (3,2)
+        FlipFluid& f = *scene.fluid;
+        scene.obstacleVelX = 0.0f;    // static obstacle → deterministic
+        scene.obstacleVelY = 0.0f;
+
+        std::printf("[bench-cpu] res=%d particles=%d warmup=%d measure=%d ...\n",
+                    res, f.numParticles, warmup, measure);
+
+        int total = warmup + measure;
+        for (int frame = 0; frame < total && w.running; ++frame) {
+            // Pump events so the window stays responsive; allow Q/Esc to abort.
+            while (XPending(w.dpy) > 0) {
+                XEvent e; XNextEvent(w.dpy, &e);
+                if (e.type == ClientMessage) {
+                    if ((Atom)e.xclient.data.l[0] == w.wm_delete) w.running = false;
+                } else if (e.type == KeyPress) {
+                    KeySym ks = XLookupKeysym(&e.xkey, 0);
+                    if (ks == XK_q || ks == XK_Q || ks == XK_Escape) w.running = false;
+                }
+            }
+            if (frame == warmup) f.resetTiming();   // discard warmup, start measuring
+            benchStepAndRender(w, f, frame >= warmup);
+        }
+
+        f.printTiming();
+        if (csv) {
+            double inv = (f.accumFrames > 0) ? 1.0 / f.accumFrames : 0.0;
+            std::fprintf(csv, "cpu,%d,%d,%d,%d,%d", res, f.numParticles,
+                         f.lastNumPressureIters, f.lastNumSubSteps,
+                         f.lastNumPressureIters * f.lastNumSubSteps);
+            for (int i = 0; i < NUM_TIMING_STAGES; ++i)
+                std::fprintf(csv, ",%.4f", f.accumMs[i] * inv);
+            std::fprintf(csv, "\n");
+            std::fflush(csv);
+        }
+    }
+
+    if (csv) { std::fclose(csv); std::printf("[bench-cpu] wrote %s\n", csvPath); }
+}
+
 // --------------------------- main -------------------------------------------
 
 int main(int argc, char** argv) {
     bool noVsync = false;
+    bool bench = false;
+    int  benchWarmup = 60, benchMeasure = 600;
+    const char* benchCsv = "bench_cpu.csv";
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--no-vsync") == 0) noVsync = true;
+        else if (std::strcmp(argv[i], "--bench") == 0) { bench = true; noVsync = true; }
+        else if (std::strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) benchWarmup = std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) benchMeasure = std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "--csv") == 0 && i + 1 < argc) benchCsv = argv[++i];
         else if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0) {
-            std::printf("Usage: %s [--no-vsync]\n", argv[0]);
+            std::printf("Usage: %s [--no-vsync] [--bench] [--warmup N] [--frames N] [--csv FILE]\n", argv[0]);
+            std::printf("  --bench   sweep res {50,100,150,200}, discard warmup, average measure frames, write CSV\n");
             std::printf("Controls: LMB=move obstacle, SPACE/P=pause, G=grid, R=reset, Q/Esc=quit\n");
             return 0;
         }
@@ -316,6 +453,14 @@ int main(int argc, char** argv) {
         auto pfn = (PFNGLXSWAPINTERVAL)glXGetProcAddressARB(
             (const GLubyte*)"glXSwapIntervalMESA");
         if (pfn) pfn(0);
+    }
+
+    // Automated benchmark mode: run the sweep, then exit (no interactive loop).
+    if (bench) {
+        runBenchmark(w, benchWarmup, benchMeasure, benchCsv);
+        destroyWindow(w);
+        delete scene.fluid;
+        return 0;
     }
 
     bool mouseDownPrev = false;        // sim-side latch (obstacle drag)
@@ -482,9 +627,12 @@ int main(int argc, char** argv) {
         flipcpu_ui::restoreProjection();
 
         glXSwapBuffers(w.dpy, w.xwin);
-        
-        f.accumMs[T9_RENDER] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - renderStart).count();
-        f.accumMs[T_TOTAL] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frameStart).count();
+
+        // Only accumulate on stepped frames so T9/T_total align with accumFrames.
+        if (!scene.paused) {
+            f.accumMs[T9_RENDER] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - renderStart).count();
+            f.accumMs[T_TOTAL]  += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frameStart).count();
+        }
 
         // ----- fps -----
         fpsFrames += 1;

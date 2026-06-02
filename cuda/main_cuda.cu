@@ -5,12 +5,16 @@
 #include <X11/keysym.h>
 #include <GL/gl.h>
 #include <GL/glx.h>
+#include <cuda_gl_interop.h>
 
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <string>
 #include <vector>
 
 using namespace flipcpu_ui;
@@ -199,6 +203,112 @@ static void drawObstacle(float ox, float oy, float orad, float particleRadius) {
     glEnd();
 }
 
+// ── B1: CUDA ↔ OpenGL interop ──────────────────────────────────
+// Particle positions/colors live in GL VBOs that CUDA maps and writes into
+// directly (k_packParticles), so rendering needs no device→host copy. The
+// legacy glBegin/glVertex path (drawParticles) is the no-interop fallback.
+
+#ifndef GL_ARRAY_BUFFER
+#define GL_ARRAY_BUFFER 0x8892
+#endif
+#ifndef GL_DYNAMIC_DRAW
+#define GL_DYNAMIC_DRAW 0x88E8
+#endif
+
+typedef void (*PFN_glGenBuffers)(GLsizei, GLuint*);
+typedef void (*PFN_glBindBuffer)(GLenum, GLuint);
+typedef void (*PFN_glBufferData)(GLenum, ptrdiff_t, const void*, GLenum);
+typedef void (*PFN_glDeleteBuffers)(GLsizei, const GLuint*);
+
+static PFN_glGenBuffers    p_glGenBuffers    = nullptr;
+static PFN_glBindBuffer    p_glBindBuffer    = nullptr;
+static PFN_glBufferData    p_glBufferData    = nullptr;
+static PFN_glDeleteBuffers p_glDeleteBuffers = nullptr;
+
+static GLuint g_vboPos = 0, g_vboCol = 0;
+static cudaGraphicsResource* g_resPos = nullptr;
+static cudaGraphicsResource* g_resCol = nullptr;
+static int  g_interopCapacity = 0;     // registered maxParticles
+static bool g_glFnsLoaded = false;
+static bool g_useInterop = false;      // --interop: write to VBO instead of D2H
+
+static bool loadGLBufferFns() {
+    p_glGenBuffers    = (PFN_glGenBuffers)   glXGetProcAddressARB((const GLubyte*)"glGenBuffers");
+    p_glBindBuffer    = (PFN_glBindBuffer)   glXGetProcAddressARB((const GLubyte*)"glBindBuffer");
+    p_glBufferData    = (PFN_glBufferData)   glXGetProcAddressARB((const GLubyte*)"glBufferData");
+    p_glDeleteBuffers = (PFN_glDeleteBuffers)glXGetProcAddressARB((const GLubyte*)"glDeleteBuffers");
+    g_glFnsLoaded = p_glGenBuffers && p_glBindBuffer && p_glBufferData && p_glDeleteBuffers;
+    return g_glFnsLoaded;
+}
+
+static void cleanupInterop() {
+    if (g_resPos) { cudaGraphicsUnregisterResource(g_resPos); g_resPos = nullptr; }
+    if (g_resCol) { cudaGraphicsUnregisterResource(g_resCol); g_resCol = nullptr; }
+    if (g_vboPos && p_glDeleteBuffers) { p_glDeleteBuffers(1, &g_vboPos); g_vboPos = 0; }
+    if (g_vboCol && p_glDeleteBuffers) { p_glDeleteBuffers(1, &g_vboCol); g_vboCol = 0; }
+    g_interopCapacity = 0;
+}
+
+// (Re)create + register VBOs sized for f->maxParticles. Returns false if GL
+// buffer functions or CUDA registration are unavailable (caller falls back).
+static bool ensureInterop(FlipFluidCUDA* f) {
+    if (!g_glFnsLoaded && !loadGLBufferFns()) return false;
+    if (g_interopCapacity == f->maxParticles && g_vboPos && g_vboCol) return true;
+
+    cleanupInterop();
+    int cap = f->maxParticles;
+
+    p_glGenBuffers(1, &g_vboPos);
+    p_glBindBuffer(GL_ARRAY_BUFFER, g_vboPos);
+    p_glBufferData(GL_ARRAY_BUFFER, (ptrdiff_t)cap * 2 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+
+    p_glGenBuffers(1, &g_vboCol);
+    p_glBindBuffer(GL_ARRAY_BUFFER, g_vboCol);
+    p_glBufferData(GL_ARRAY_BUFFER, (ptrdiff_t)cap * 3 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+    p_glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    if (cudaGraphicsGLRegisterBuffer(&g_resPos, g_vboPos, cudaGraphicsRegisterFlagsWriteDiscard) != cudaSuccess ||
+        cudaGraphicsGLRegisterBuffer(&g_resCol, g_vboCol, cudaGraphicsRegisterFlagsWriteDiscard) != cudaSuccess) {
+        fprintf(stderr, "[interop] cudaGraphicsGLRegisterBuffer failed; falling back to D2H\n");
+        cleanupInterop();
+        return false;
+    }
+    g_interopCapacity = cap;
+    return true;
+}
+
+// Map the VBOs, pack particle data into them with a kernel, unmap. This is the
+// interop equivalent of downloadForRender() and is what T10 measures.
+static void mapPackUnmap(FlipFluidCUDA* f) {
+    cudaGraphicsResource* res[2] = { g_resPos, g_resCol };
+    CUDA_CHECK(cudaGraphicsMapResources(2, res, 0));
+    float2* dPos = nullptr; float3* dCol = nullptr; size_t nbytes = 0;
+    CUDA_CHECK(cudaGraphicsResourceGetMappedPointer((void**)&dPos, &nbytes, g_resPos));
+    CUDA_CHECK(cudaGraphicsResourceGetMappedPointer((void**)&dCol, &nbytes, g_resCol));
+    f->packParticlesToBuffers(dPos, dCol);
+    CUDA_CHECK(cudaGraphicsUnmapResources(2, res, 0));
+}
+
+static void drawParticlesInterop(FlipFluidCUDA* f, int viewportH) {
+    float pxPerSimUnit = float(viewportH) / simHeight;
+    float diameterPx = 2.0f * f->particleRadius * pxPerSimUnit;
+    if (diameterPx < 1.0f) diameterPx = 1.0f;
+    glPointSize(diameterPx);
+
+    p_glBindBuffer(GL_ARRAY_BUFFER, g_vboPos);
+    glVertexPointer(2, GL_FLOAT, 0, 0);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    p_glBindBuffer(GL_ARRAY_BUFFER, g_vboCol);
+    glColorPointer(3, GL_FLOAT, 0, 0);
+    glEnableClientState(GL_COLOR_ARRAY);
+
+    glDrawArrays(GL_POINTS, 0, f->numParticles);
+
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glDisableClientState(GL_COLOR_ARRAY);
+    p_glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
 // ── X11 Window Setup ───────────────────────────────────────────
 static int s_glxAttrs[] = {
     GLX_RGBA, GLX_DOUBLEBUFFER, GLX_DEPTH_SIZE, 24,
@@ -247,11 +357,197 @@ static bool createWindow(AppWindow& w, const char* title) {
     return true;
 }
 
+// ── Benchmark ──────────────────────────────────────────────────
+static std::string procField(const char* path, const char* key) {
+    std::ifstream f(path);
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.rfind(key, 0) == 0) {
+            auto pos = line.find(':');
+            if (pos == std::string::npos) pos = line.find('=');
+            if (pos != std::string::npos) {
+                std::string v = line.substr(pos + 1);
+                size_t a = v.find_first_not_of(" \t");
+                return (a == std::string::npos) ? "" : v.substr(a);
+            }
+        }
+    }
+    return "";
+}
+
+static void printSystemInfo() {
+    std::printf("=== System Info (CUDA build) ===\n");
+    std::string cpu = procField("/proc/cpuinfo", "model name");
+    std::string mem = procField("/proc/meminfo", "MemTotal");
+    std::printf("  CPU : %s\n", cpu.empty() ? "(unknown)" : cpu.c_str());
+    std::printf("  RAM : %s\n", mem.empty() ? "(unknown)" : mem.c_str());
+
+    int dev = 0;
+    cudaDeviceProp prop;
+    if (cudaGetDevice(&dev) == cudaSuccess &&
+        cudaGetDeviceProperties(&prop, dev) == cudaSuccess) {
+        // Peak DRAM bandwidth (GB/s) = 2 * memClock(kHz)*1e3 * busWidth/8 / 1e9.
+        double bwGBs = 2.0 * (double)prop.memoryClockRate * 1e3 *
+                       ((double)prop.memoryBusWidth / 8.0) / 1e9;
+        std::printf("  GPU : %s  (compute capability %d.%d)\n",
+                    prop.name, prop.major, prop.minor);
+        std::printf("  GPU mem: %.1f GB  bus: %d-bit  memClock: %.0f MHz\n",
+                    prop.totalGlobalMem / (1024.0 * 1024.0 * 1024.0),
+                    prop.memoryBusWidth, prop.memoryClockRate / 1000.0);
+        std::printf("  Peak DRAM bandwidth (datasheet est.): %.1f GB/s\n", bwGBs);
+        int rt = 0, drv = 0;
+        cudaRuntimeGetVersion(&rt); cudaDriverGetVersion(&drv);
+        std::printf("  CUDA runtime: %d.%d  driver: %d.%d\n",
+                    rt / 1000, (rt % 1000) / 10, drv / 1000, (drv % 1000) / 10);
+    }
+    std::printf("================================\n\n");
+}
+
+// Prepare render data and return the measured T10 time (ms). Interop path maps
+// the VBOs and packs them on-GPU (no D2H); fallback copies to host. Grid colors
+// have no VBO, so they are pulled D2H when the grid is shown.
+static float prepRenderData(FlipFluidCUDA* f, bool wantGrid) {
+    if (g_useInterop && !ensureInterop(f)) g_useInterop = false;
+    f->startTiming(T10_TRANSFER, 0);
+    if (g_useInterop) {
+        mapPackUnmap(f);
+        if (wantGrid)
+            cudaMemcpy(f->h_cellColor, f->d_cellColor,
+                       3 * f->fNumCells * sizeof(float), cudaMemcpyDeviceToHost);
+    } else {
+        f->downloadForRender();
+    }
+    f->stopTiming(T10_TRANSFER, 0);
+    cudaEventSynchronize(f->evStop[T10_TRANSFER][0]);
+    float ms = 0;
+    cudaEventElapsedTime(&ms, f->evStart[T10_TRANSFER][0], f->evStop[T10_TRANSFER][0]);
+    return ms;
+}
+
+static void drawParticlesAuto(FlipFluidCUDA* f, int viewportH) {
+    if (g_useInterop) drawParticlesInterop(f, viewportH);
+    else              drawParticles(f, viewportH);
+}
+
+// Step the GPU sim, copy/map for render (T10), render (T9), swap. When `record`,
+// accumulate T9/T10/T_total. T1..T8 are accumulated inside simulate().
+static void benchStepAndRender(AppWindow& w, FlipFluidCUDA* f, bool record) {
+    auto frameStart = std::chrono::steady_clock::now();
+    f->simulate(scene.dt, scene.gravity, scene.flipRatio, scene.numPressureIters,
+                scene.numParticleIters, scene.overRelaxation, scene.compensateDrift,
+                scene.separateParticles, scene.obstacleX, scene.obstacleY,
+                scene.obstacleRadius, scene.obstacleVelX, scene.obstacleVelY,
+                scene.numSubSteps);
+    scene.frameNr++;
+
+    float transferMs = prepRenderData(f, scene.showGrid);
+
+    f->startTiming(T9_RENDER, 0);
+    glClear(GL_COLOR_BUFFER_BIT);
+    setProjection(w.width, w.height);
+    if (scene.showGrid)      drawGrid(f);
+    if (scene.showParticles) drawParticlesAuto(f, w.height);
+    if (scene.showObstacle)  drawObstacle(scene.obstacleX, scene.obstacleY,
+                                          scene.obstacleRadius, f->particleRadius);
+    glXSwapBuffers(w.dpy, w.xwin);
+    f->stopTiming(T9_RENDER, 0);
+    cudaEventSynchronize(f->evStop[T9_RENDER][0]);
+    float renderMs = 0;
+    cudaEventElapsedTime(&renderMs, f->evStart[T9_RENDER][0], f->evStop[T9_RENDER][0]);
+
+    double frameMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - frameStart).count();
+
+    if (record) {
+        f->accumMs[T10_TRANSFER] += transferMs;
+        f->accumMs[T9_RENDER]    += renderMs;
+        f->accumMs[T_TOTAL]      += frameMs;
+    }
+}
+
+static void runBenchmark(AppWindow& w, int warmup, int measure, const char* csvPath) {
+    static const int resolutions[] = {50, 100, 150, 200};
+
+    scene.gravity           = -9.81f;
+    scene.compensateDrift   = true;
+    scene.separateParticles = true;
+    scene.flipRatio         = 0.9f;
+    scene.showGrid          = false;
+    scene.showParticles     = true;
+    scene.showObstacle      = true;
+    scene.paused            = false;
+
+    printSystemInfo();
+
+    FILE* csv = csvPath ? std::fopen(csvPath, "w") : nullptr;
+    if (csv) {
+        std::fprintf(csv, "version,res,particles,numPressureIters,numSubSteps,"
+                     "effPressureIters,T1_integrate,T2_pushApart,T3_collisions,"
+                     "T4_p2g,T5_density,T6_pressure,T7_g2p,T8_colors,T9_render,"
+                     "T10_transfer,T_total\n");
+    }
+
+    for (int res : resolutions) {
+        if (!w.running) break;
+        scene.resolution = res;
+        setupScene();                 // rebuilds fluid; obstacle carved at (3,2)
+        FlipFluidCUDA* f = scene.fluid;
+        scene.obstacleVelX = 0.0f;
+        scene.obstacleVelY = 0.0f;
+
+        std::printf("[bench-cuda] res=%d particles=%d warmup=%d measure=%d ...\n",
+                    res, f->numParticles, warmup, measure);
+
+        int total = warmup + measure;
+        for (int frame = 0; frame < total && w.running; ++frame) {
+            while (XPending(w.dpy) > 0) {
+                XEvent e; XNextEvent(w.dpy, &e);
+                if (e.type == ClientMessage) {
+                    if ((Atom)e.xclient.data.l[0] == w.wm_delete) w.running = false;
+                } else if (e.type == KeyPress) {
+                    KeySym ks = XLookupKeysym(&e.xkey, 0);
+                    if (ks == XK_q || ks == XK_Q || ks == XK_Escape) w.running = false;
+                }
+            }
+            if (frame == warmup) f->resetTiming();
+            benchStepAndRender(w, f, frame >= warmup);
+        }
+
+        f->printTiming();
+        if (csv) {
+            double inv = (f->accumFrames > 0) ? 1.0 / f->accumFrames : 0.0;
+            std::fprintf(csv, "cuda,%d,%d,%d,%d,%d", res, f->numParticles,
+                         f->lastNumPressureIters, f->lastNumSubSteps,
+                         f->lastNumPressureIters * f->lastNumSubSteps);
+            for (int i = 0; i < NUM_TIMING_STAGES; ++i)
+                std::fprintf(csv, ",%.4f", f->accumMs[i] * inv);
+            std::fprintf(csv, "\n");
+            std::fflush(csv);
+        }
+    }
+
+    if (csv) { std::fclose(csv); std::printf("[bench-cuda] wrote %s\n", csvPath); }
+}
+
 // ── Main Loop ──────────────────────────────────────────────────
 int main(int argc, char** argv) {
     bool noVsync = false;
+    bool bench = false;
+    int  benchWarmup = 60, benchMeasure = 600;
+    const char* benchCsv = "bench_cuda.csv";
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--no-vsync") == 0) noVsync = true;
+        else if (std::strcmp(argv[i], "--bench") == 0) { bench = true; noVsync = true; }
+        else if (std::strcmp(argv[i], "--interop") == 0) g_useInterop = true;
+        else if (std::strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) benchWarmup = std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) benchMeasure = std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "--csv") == 0 && i + 1 < argc) benchCsv = argv[++i];
+        else if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0) {
+            std::printf("Usage: %s [--no-vsync] [--bench] [--interop] [--warmup N] [--frames N] [--csv FILE]\n", argv[0]);
+            std::printf("  --bench    sweep res {50,100,150,200}, discard warmup, average measure frames, write CSV\n");
+            std::printf("  --interop  render via CUDA-OpenGL VBO interop (no device->host copy)\n");
+            return 0;
+        }
     }
 
     std::printf("[flip-cuda] starting (GPU sim, GPU render)\n");
@@ -265,6 +561,19 @@ int main(int argc, char** argv) {
         typedef int (*PFNGLXSWAPINTERVAL)(int);
         auto pfn = (PFNGLXSWAPINTERVAL)glXGetProcAddressARB((const GLubyte*)"glXSwapIntervalMESA");
         if (pfn) pfn(0);
+    }
+
+    if (g_useInterop) std::printf("[flip-cuda] CUDA-OpenGL interop enabled\n");
+
+    // Automated benchmark mode: run the sweep, then exit.
+    if (bench) {
+        runBenchmark(w, benchWarmup, benchMeasure, benchCsv);
+        cleanupInterop();
+        if (w.glc) { glXMakeCurrent(w.dpy, None, nullptr); glXDestroyContext(w.dpy, w.glc); }
+        if (w.xwin) XDestroyWindow(w.dpy, w.xwin);
+        if (w.dpy) XCloseDisplay(w.dpy);
+        delete scene.fluid;
+        return 0;
     }
 
     bool mouseDownPrev = false, mouseDown = false, mousePressedEdge = false, mouseReleasedEdge = false;
@@ -327,6 +636,10 @@ int main(int argc, char** argv) {
 
         FlipFluidCUDA* f = scene.fluid;
 
+        // T_total is wall-clock for the whole frame (sim + D2H + render + swap),
+        // matching the CPU build's T_total so the two are directly comparable.
+        auto frameStart = std::chrono::steady_clock::now();
+
         if (!scene.paused) {
             f->simulate(scene.dt, scene.gravity, scene.flipRatio, scene.numPressureIters,
                         scene.numParticleIters, scene.overRelaxation, scene.compensateDrift,
@@ -336,25 +649,17 @@ int main(int argc, char** argv) {
             scene.frameNr++;
         }
 
-        // T10: Memory transfer for rendering (D2H)
-        f->startTiming(T10_TRANSFER);
-        f->downloadForRender();
-        f->stopTiming(T10_TRANSFER);
-        
-        // Wait for D2H so we can measure it
-        cudaEventSynchronize(f->evStop[T10_TRANSFER]);
-        float transferMs = 0;
-        cudaEventElapsedTime(&transferMs, f->evStart[T10_TRANSFER], f->evStop[T10_TRANSFER]);
-        f->accumMs[T10_TRANSFER] += transferMs;
+        // T10: render data prep — interop map/pack/unmap, or D2H fallback.
+        float transferMs = prepRenderData(f, scene.showGrid);
 
         // T9: Rendering
-        f->startTiming(T9_RENDER);
-        
+        f->startTiming(T9_RENDER, 0);
+
         glClear(GL_COLOR_BUFFER_BIT);
         setProjection(w.width, w.height);
 
         if (scene.showGrid) drawGrid(f);
-        if (scene.showParticles) drawParticles(f, w.height);
+        if (scene.showParticles) drawParticlesAuto(f, w.height);
         if (scene.showObstacle) drawObstacle(scene.obstacleX, scene.obstacleY, scene.obstacleRadius, f->particleRadius);
 
         flipcpu_ui::setProjectionToPixels(w.width, w.height);
@@ -387,12 +692,22 @@ int main(int argc, char** argv) {
         flipcpu_ui::restoreProjection();
 
         glXSwapBuffers(w.dpy, w.xwin);
-        
-        f->stopTiming(T9_RENDER);
-        cudaEventSynchronize(f->evStop[T9_RENDER]);
+
+        f->stopTiming(T9_RENDER, 0);
+        cudaEventSynchronize(f->evStop[T9_RENDER][0]);
         float renderMs = 0;
-        cudaEventElapsedTime(&renderMs, f->evStart[T9_RENDER], f->evStop[T9_RENDER]);
-        f->accumMs[T9_RENDER] += renderMs;
+        cudaEventElapsedTime(&renderMs, f->evStart[T9_RENDER][0], f->evStop[T9_RENDER][0]);
+
+        double frameMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - frameStart).count();
+
+        // Only accumulate timing on frames that actually stepped the sim, so
+        // T9/T10/T_total stay aligned with accumFrames (incremented in simulate).
+        if (!scene.paused) {
+            f->accumMs[T10_TRANSFER] += transferMs;
+            f->accumMs[T9_RENDER]    += renderMs;
+            f->accumMs[T_TOTAL]      += frameMs;
+        }
 
         fpsFrames++;
         auto now = std::chrono::steady_clock::now();
@@ -407,10 +722,11 @@ int main(int argc, char** argv) {
         }
     }
 
+    cleanupInterop();
     if (w.glc) { glXMakeCurrent(w.dpy, None, nullptr); glXDestroyContext(w.dpy, w.glc); }
     if (w.xwin) XDestroyWindow(w.dpy, w.xwin);
     if (w.dpy) XCloseDisplay(w.dpy);
-    
+
     delete scene.fluid;
     return 0;
 }

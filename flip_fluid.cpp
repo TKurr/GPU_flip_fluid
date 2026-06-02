@@ -549,8 +549,10 @@ void FlipFluid::simulate(float dt, float gravity, float flipRatio,
 {
     if (numSubSteps < 1) numSubSteps = 1;
     float sdt = dt / numSubSteps;
-    
-    auto frameStart = std::chrono::steady_clock::now();
+
+    lastNumPressureIters = numPressureIters;
+    lastNumSubSteps = numSubSteps;
+
     double frameMs[NUM_TIMING_STAGES] = {0};
 
     for (int step = 0; step < numSubSteps; ++step) {
@@ -608,6 +610,11 @@ void FlipFluid::printTiming() {
         "T9_render", "T10_d2h", "T_total"
     };
     std::printf("\n=== CPU Timing (avg over %d frames) ===\n", accumFrames);
+    std::printf("  grid: %dx%d (%d cells)  particles: %d\n",
+                fNumX, fNumY, fNumCells, numParticles);
+    std::printf("  numPressureIters=%d  numSubSteps=%d  effective pressure iters/frame=%d\n",
+                lastNumPressureIters, lastNumSubSteps,
+                lastNumPressureIters * lastNumSubSteps);
     for (int i = 0; i < NUM_TIMING_STAGES; i++) {
         std::printf("  %-16s: %8.3f ms\n", stageNames[i], accumMs[i] / accumFrames);
     }

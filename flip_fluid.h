@@ -89,6 +89,8 @@ public:
     // ── Timing ──
     double accumMs[NUM_TIMING_STAGES];
     int    accumFrames;
+    int    lastNumPressureIters = 0;   // per-solve iterations (last frame)
+    int    lastNumSubSteps      = 1;   // substeps per frame (last frame)
     void resetTiming();
     void printTiming();
 
