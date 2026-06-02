@@ -1,15 +1,9 @@
-// Numerical validation: CPU (reference) vs CUDA port.
-//
-// Runs both simulators from an IDENTICAL initial state for N frames with the
-// same parameters, then reports max-abs and RMS (L2) error per field. Errors
-// are expected to be small but nonzero — the orderings differ on purpose
-// (sequential Gauss-Seidel vs red-black; sequential scatter vs atomic). The
-// point is to show the deviation stays bounded / small relative to the field.
-//
-// Headless (no OpenGL). Build: `make flip_validate`. Run: ./flip_validate [opts]
+// numerical validation: cpu vs cuda
+// checks if both simulators give similar results.
+// errors will happen because of different order of operations (red-black etc).
 
-#include "../flip_fluid.h"          // CPU reference (namespace flipcpu)
-#include "flip_fluid_cuda.cuh"      // CUDA port
+#include "../flip_fluid.h"
+#include "flip_fluid_cuda.cuh"
 
 #include <cmath>
 #include <cstdio>
@@ -17,9 +11,9 @@
 #include <cstring>
 #include <vector>
 
-// Scene constants mirror main.cpp / main_cuda.cu exactly.
+// scene constants
 static const float simHeight = 3.0f;
-static const float simWidth  = 900.0f / (700.0f / simHeight);   // ~3.857
+static const float simWidth  = 900.0f / (700.0f / simHeight);
 
 struct SetupResult {
     int numX, numY, maxParticles, numSubSteps, numPressureIters;
@@ -49,7 +43,7 @@ static SetupResult computeSetup(int res) {
     return s;
 }
 
-// Seed particle positions identically to the apps.
+// init particles
 static void seed(std::vector<float>& px, std::vector<float>& py,
                  const SetupResult& s) {
     px.assign(s.maxParticles, 0.0f);
@@ -63,7 +57,6 @@ static void seed(std::vector<float>& px, std::vector<float>& py,
         }
 }
 
-// Border-solid tank `s` grid, matching setupTank().
 static void buildTank(std::vector<float>& sgrid, int fNumX, int fNumY) {
     sgrid.assign(fNumX * fNumY, 1.0f);
     for (int i = 0; i < fNumX; ++i)
@@ -72,7 +65,6 @@ static void buildTank(std::vector<float>& sgrid, int fNumX, int fNumY) {
                 sgrid[i * fNumY + j] = 0.0f;
 }
 
-// Carve a static obstacle into CPU arrays (mirrors carveObstacle in main.cpp).
 static void carveCPU(flipcpu::FlipFluid& f, float ox, float oy, float r) {
     int n = f.fNumY;
     for (int i = 1; i < f.fNumX - 2; ++i)
@@ -136,7 +128,7 @@ int main(int argc, char** argv) {
     std::vector<float> cr(s.maxParticles, 0.0f), cg(s.maxParticles, 0.0f),
                        cb(s.maxParticles, 1.0f);
 
-    // ── CPU sim ──
+    // CPU sim
     flipcpu::FlipFluid cpu(s.density, s.tankWidth, s.tankHeight, s.h, s.r, s.maxParticles);
     cpu.numParticles = s.maxParticles;
     cpu.particleRestDensity = 0.0f;
@@ -152,7 +144,7 @@ int main(int argc, char** argv) {
     }
     carveCPU(cpu, obsX, obsY, obsR);
 
-    // ── CUDA sim (identical init) ──
+    // CUDA sim
     FlipFluidCUDA gpu(s.density, s.tankWidth, s.tankHeight, s.h, s.r, s.maxParticles);
     {
         std::vector<float> sgrid;
@@ -176,7 +168,7 @@ int main(int argc, char** argv) {
                      obsX, obsY, obsR, 0.0f, 0.0f, s.numSubSteps);
     }
 
-    // ── Pull CUDA state back and compare ──
+    // pull state back
     int nP = s.maxParticles, nC = cpu.fNumCells;
     std::vector<float> gpx(nP), gpy(nP), gvx(nP), gvy(nP), gu(nC), gv(nC);
     CUDA_CHECK(cudaMemcpy(gpx.data(), gpu.d_particlePosX, nP * sizeof(float), cudaMemcpyDeviceToHost));
@@ -194,7 +186,6 @@ int main(int argc, char** argv) {
     printRow("grid u",       compare(cpu.u.data(), gu.data(), nC));
     printRow("grid v",       compare(cpu.v.data(), gv.data(), nC));
     std::printf("========================================\n");
-    std::printf("Note: nonzero error is expected (GS vs red-black, atomic ordering).\n");
-    std::printf("Small RMS relative to the field magnitude => the port is correct.\n");
+    std::printf("Note: some error is expected.\n");
     return 0;
 }

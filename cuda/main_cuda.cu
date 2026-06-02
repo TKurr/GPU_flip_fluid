@@ -51,7 +51,7 @@ constexpr float simHeight = 3.0f;
 constexpr float cScale = float(CANVAS_H) / simHeight;
 constexpr float simWidth = float(CANVAS_W) / cScale;
 
-// ── CPU Setup Helpers (Staging before uploading to GPU) ───────────────
+// helpers for simulation setup
 static void setObstacle(float x, float y, bool reset) {
     float vx = 0.0f, vy = 0.0f;
     if (!reset) {
@@ -309,7 +309,7 @@ static void drawParticlesInterop(FlipFluidCUDA* f, int viewportH) {
     p_glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
-// ── X11 Window Setup ───────────────────────────────────────────
+// setup x11 window
 static int s_glxAttrs[] = {
     GLX_RGBA, GLX_DOUBLEBUFFER, GLX_DEPTH_SIZE, 24,
     GLX_RED_SIZE, 8, GLX_GREEN_SIZE, 8, GLX_BLUE_SIZE, 8, None
@@ -357,7 +357,7 @@ static bool createWindow(AppWindow& w, const char* title) {
     return true;
 }
 
-// ── Benchmark ──────────────────────────────────────────────────
+// benchmarking functions
 static std::string procField(const char* path, const char* key) {
     std::ifstream f(path);
     std::string line;
@@ -536,7 +536,6 @@ static void runBenchmark(AppWindow& w, int warmup, int measure,
     if (csv) { std::fclose(csv); std::printf("[bench-cuda] wrote %s\n", csvPath); }
 }
 
-// ── Main Loop ──────────────────────────────────────────────────
 int main(int argc, char** argv) {
     bool noVsync = false;
     bool bench = false;

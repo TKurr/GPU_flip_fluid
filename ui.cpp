@@ -9,8 +9,7 @@
 
 namespace flipcpu_ui {
 
-// ---------- font8x8_basic (public domain, Daniel Hepper / Marcel Sondaar) ----
-// Bit 0 = leftmost pixel; bit 7 = rightmost.
+// font data
 static const unsigned char font8x8[128][8] = {
     {0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},
     {0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},{0,0,0,0,0,0,0,0},
@@ -118,15 +117,15 @@ static const unsigned char font8x8[128][8] = {
     {0,0,0,0,0,0,0,0},                          /* DEL */
 };
 
-// ---------- state -----------------------------------------------------------
-static constexpr int kCharScale  = 1;     // pixel size of each font pixel (was 2)
+// ui state
+static constexpr int kCharScale  = 1;
 static constexpr int kCharW      = 8 * kCharScale;
 static constexpr int kCharH      = 8 * kCharScale;
 static constexpr int kRowH       = kCharH + 4;
 static constexpr int kPadX       = 6;
 static constexpr int kTitleH     = kCharH + 6;
-static constexpr int kCheckBox   = 10;   // checkbox square
-static constexpr int kSliderTrk  = 4;    // slider track thickness
+static constexpr int kCheckBox   = 10;
+static constexpr int kSliderTrk  = 4;
 static constexpr int kSliderW    = 80;
 static constexpr int kSliderH    = 10;
 static constexpr int kButtonH    = kCharH + 6;
@@ -137,13 +136,12 @@ struct State {
     int   cursorY = 0;
     bool  inPanel = false;
     bool  wants_mouse = false;
-    // persistent across frames
     const void* activeSliderId = nullptr;
 };
 
 static State g;
 
-// ---------- helpers ---------------------------------------------------------
+// drawing helpers
 static inline bool pointInRect(int px, int py, int x, int y, int w, int h) {
     return px >= x && px < x + w && py >= y && py < y + h;
 }
@@ -202,7 +200,7 @@ static void drawText(int x, int y, const char* s, float r, float g_, float b) {
     glEnd();
 }
 
-// ---------- projection ------------------------------------------------------
+// set projection to pixel coords
 void setProjectionToPixels(int width, int height) {
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
@@ -221,7 +219,7 @@ void restoreProjection() {
     glPopMatrix();
 }
 
-// ---------- API -------------------------------------------------------------
+// gui logic
 void begin(const Input& in) {
     g.in = in;
     g.wants_mouse = false;

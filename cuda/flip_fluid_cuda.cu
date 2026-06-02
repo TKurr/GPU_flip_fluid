@@ -8,7 +8,7 @@
 #define BLK 256
 #define GRID(n) (((n)+BLK-1)/BLK)
 
-// ── Constructor ───────────────────────────────────────────────
+// init the class
 FlipFluidCUDA::FlipFluidCUDA(float density_, float width, float height,
                              float spacing, float particle_radius, int max_particles) {
     density = density_;
@@ -57,7 +57,7 @@ FlipFluidCUDA::FlipFluidCUDA(float density_, float width, float height,
     // Reduction temporaries
     CUDA_CHECK(cudaMalloc(&d_reductionBuf, sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_reductionIntBuf, sizeof(int)));
-    // Scan scratch: one int per thread-block over the spatial-hash cells.
+    // Scan scratch
     CUDA_CHECK(cudaMalloc(&d_blockSums, GRID(pNumCells) * sizeof(int)));
 
     // Zero everything
@@ -81,7 +81,7 @@ FlipFluidCUDA::FlipFluidCUDA(float density_, float width, float height,
     h_particleColorB = new float[maxParticles];
     h_cellColor = new float[3*fNumCells];
 
-    // Timing events (one pair per stage per substep)
+    // Timing events
     for (int i = 0; i < NUM_TIMING_STAGES; i++) {
         for (int s = 0; s < MAX_SUBSTEPS; s++) {
             CUDA_CHECK(cudaEventCreate(&evStart[i][s]));
@@ -116,7 +116,7 @@ FlipFluidCUDA::~FlipFluidCUDA() {
     cudaEventDestroy(evFrameStart); cudaEventDestroy(evFrameStop);
 }
 
-// ── Upload ────────────────────────────────────────────────────
+// upload data to gpu
 void FlipFluidCUDA::uploadParticles(const float* posX, const float* posY,
                                     const float* velX, const float* velY,
                                     const float* colR, const float* colG, const float* colB,
@@ -136,7 +136,7 @@ void FlipFluidCUDA::uploadGrid(const float* s_host) {
     CUDA_CHECK(cudaMemcpy(d_s, s_host, fNumCells*sizeof(float), cudaMemcpyHostToDevice));
 }
 
-// ── Timing ────────────────────────────────────────────────────
+// record timing events
 void FlipFluidCUDA::startTiming(TimingStage s, int sub) {
     if (sub < 0 || sub >= MAX_SUBSTEPS) sub = 0;
     CUDA_CHECK(cudaEventRecord(evStart[s][sub]));
@@ -162,7 +162,7 @@ void FlipFluidCUDA::printTiming() {
     printf("=========================================\n\n");
 }
 
-// ── Simulation stages ─────────────────────────────────────────
+// --- sim stages ---
 void FlipFluidCUDA::integrateParticles(float dt, float gravity) {
     k_integrate<<<GRID(numParticles),BLK>>>(d_particlePosX, d_particlePosY,
                                             d_particleVelX, d_particleVelY,
@@ -176,14 +176,11 @@ void FlipFluidCUDA::buildSpatialHash() {
     k_hashCount<<<GRID(numParticles),BLK>>>(d_particlePosX, d_particlePosY,
                                             numParticles, d_numCellParticles,
                                             pInvSpacing, pNumX, pNumY);
-    // Inclusive prefix sum via a hand-written 3-phase parallel scan (replaces
-    // the old single-thread kernel). Matches CPU semantics:
-    // firstCellParticle[i] = sum(counts[0..i]).
+    // prefix sum for hashing
     int nBlocks = GRID(pNumCells);
     k_scanBlockInclusive<<<nBlocks, BLK, BLK * sizeof(int)>>>(
         d_numCellParticles, d_firstCellParticle, d_blockSums, pNumCells);
     if (nBlocks > 1) {
-        // Scan the per-block totals in a single block, then fold them back in.
         int tpb = 1;
         while (tpb < nBlocks) tpb <<= 1;
         if (tpb > 1024) {
@@ -194,8 +191,7 @@ void FlipFluidCUDA::buildSpatialHash() {
             d_blockSums, d_blockSums, nullptr, nBlocks);
         k_addBlockOffsets<<<nBlocks, BLK>>>(d_firstCellParticle, d_blockSums, pNumCells);
     }
-    // Sentinel firstCellParticle[pNumCells] = total (= last inclusive sum).
-    // Never decremented by the scatter, so it stays as the end offset.
+    // Sentinel
     CUDA_CHECK(cudaMemcpy(d_firstCellParticle + pNumCells,
                           d_firstCellParticle + (pNumCells - 1),
                           sizeof(int), cudaMemcpyDeviceToDevice));
@@ -310,7 +306,7 @@ void FlipFluidCUDA::solveIncompressibility(int numIters, float dt,
     int cd = compensateDrift ? 1 : 0;
     int totalInner = (fNumX-2)*(fNumY-2);
     for (int iter = 0; iter < numIters; iter++) {
-        // Red-Black: color 0 then color 1
+        // color 0 then color 1
         k_jacobiRB<<<GRID(totalInner),BLK>>>(d_u, d_v, d_p, d_s, d_cellType,
                                               d_particleDensity, particleRestDensity, cd,
                                               overRelaxation, cp, fNumX, fNumY, 0);
@@ -384,21 +380,14 @@ void FlipFluidCUDA::simulate(float dt, float gravity, float flipRatio,
         stopTiming(T7_G2P, step);
     }
 
-    // Colors run once per frame (outside the substep loop) — store at slot 0.
     startTiming(T8_COLORS, 0);
     updateParticleColors();
     updateCellColors();
     stopTiming(T8_COLORS, 0);
 
-    // Single sync point: once the colors stop-event completes, all the sim
-    // kernels above (same default stream) are guaranteed finished.
     CUDA_CHECK(cudaEventRecord(evFrameStop));
     CUDA_CHECK(cudaEventSynchronize(evFrameStop));
 
-    // Accumulate per-stage GPU time. For T1..T7 sum across every substep so
-    // the reported number is the per-frame cost (not just the last substep).
-    // T9_RENDER / T10_TRANSFER / T_TOTAL are measured by the caller (host
-    // wall-clock) because they include OpenGL + D2H work outside this method.
     for (int i = 0; i < NUM_TIMING_STAGES; i++) {
         if (i == T9_RENDER || i == T10_TRANSFER || i == T_TOTAL) continue;
         int nsub = (i == T8_COLORS) ? 1 : numSubSteps;

@@ -28,7 +28,7 @@
 
 using namespace flipcpu;
 
-// --------------------------- scene / config ---------------------------------
+// scene setup
 struct Scene {
     float gravity         = -9.81f;
     float dt              = 1.0f / 60.0f;
@@ -48,8 +48,8 @@ struct Scene {
     float obstacleVelY    = 0.0f;
     bool  showParticles   = true;
     bool  showGrid        = false;
-    int   resolution      = 100;   // grid cells along the tank height
-    int   numSubSteps     = 1;     // CFL substeps — auto-scaled with res
+    int   resolution      = 100;
+    int   numSubSteps     = 1;
     FlipFluid* fluid      = nullptr;
 };
 
@@ -61,7 +61,7 @@ constexpr float simHeight = 3.0f;
 constexpr float cScale = float(CANVAS_H) / simHeight;
 constexpr float simWidth = float(CANVAS_W) / cScale;
 
-// --------------------------- scene helpers ----------------------------------
+// helpers
 static void carveObstacle(FlipFluid& f, float x, float y, float r,
                           float vx, float vy)
 {
@@ -128,10 +128,7 @@ static void setupScene() {
 
     int   res         = scene.resolution;
 
-    // Stability auto-scaling. At higher resolution the cell size h shrinks,
-    // so a fixed dt violates CFL and the pressure Poisson takes more
-    // Gauss-Seidel sweeps to propagate across the finer grid. Both knobs
-    // scale with res; numbers picked to keep res=100 identical to before.
+    // adjust substeps based on resolution
     if      (res <= 100) scene.numSubSteps = 1;
     else if (res <= 140) scene.numSubSteps = 2;
     else if (res <= 180) scene.numSubSteps = 3;
@@ -155,9 +152,6 @@ static void setupScene() {
     if (numY < 1) numY = 1;
     int maxParticles = numX * numY;
 
-    // Always (re)allocate so a change to scene.resolution actually changes the
-    // grid dimensions. Pointers into scene.fluid become invalid; callers must
-    // re-fetch the reference after setupScene().
     delete scene.fluid;
     scene.fluid = new FlipFluid(density, tankWidth, tankHeight, h, r, maxParticles);
 
@@ -171,8 +165,7 @@ static void setupScene() {
     scene.frameNr = 0;
 }
 
-// --------------------------- X11 + GLX --------------------------------------
-
+// X11 setup
 static int s_glxAttrs[] = {
     GLX_RGBA, GLX_DOUBLEBUFFER, GLX_DEPTH_SIZE, 24,
     GLX_RED_SIZE, 8, GLX_GREEN_SIZE, 8, GLX_BLUE_SIZE, 8,
@@ -229,21 +222,17 @@ static void destroyWindow(AppWindow& w) {
     if (w.dpy)  XCloseDisplay(w.dpy);
 }
 
-// --------------------------- rendering --------------------------------------
-
-// Map sim coords [0, simWidth] x [0, simHeight] onto NDC [-1, 1].
+// rendering
 static void setProjection(int w, int h) {
     glViewport(0, 0, w, h);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
-    // ortho with y going up
     glOrtho(0.0, simWidth, 0.0, simHeight, -1.0, 1.0);
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 }
 
 static void drawGrid(const FlipFluid& f) {
-    // Quads, one per cell, colored by f.cellColor.
     float h = f.h;
     glBegin(GL_QUADS);
     for (int i = 0; i < f.fNumX; ++i) {
@@ -265,7 +254,6 @@ static void drawGrid(const FlipFluid& f) {
 }
 
 static void drawParticles(const FlipFluid& f, int viewportH) {
-    // Particle radius in sim units → pixels.
     float pxPerSimUnit = float(viewportH) / simHeight;
     float diameterPx = 2.0f * f.particleRadius * pxPerSimUnit;
     if (diameterPx < 1.0f) diameterPx = 1.0f;
@@ -279,7 +267,6 @@ static void drawParticles(const FlipFluid& f, int viewportH) {
 }
 
 static void drawObstacle(const FlipFluid& f, float ox, float oy, float orad) {
-    // Filled red disk via triangle fan; matches the JS demo's appearance.
     const int N = 48;
     float drawR = orad + f.particleRadius;
     glColor3f(1.0f, 0.0f, 0.0f);
@@ -292,9 +279,7 @@ static void drawObstacle(const FlipFluid& f, float ox, float oy, float orad) {
     glEnd();
 }
 
-// --------------------------- benchmark --------------------------------------
-
-// Print a single value from /proc/<file> matching a key prefix.
+// benchmarking
 static std::string procField(const char* path, const char* key) {
     std::ifstream f(path);
     std::string line;
@@ -320,12 +305,9 @@ static void printSystemInfo() {
     std::printf("  CPU : %s\n", cpu.empty() ? "(unknown)" : cpu.c_str());
     std::printf("  RAM : %s\n", mem.empty() ? "(unknown)" : mem.c_str());
     std::printf("  OS  : %s\n", os.empty() ? "(unknown)" : os.c_str());
-    std::printf("  Note: fill GPU/driver/CUDA details manually in the report.\n");
     std::printf("================================\n\n");
 }
 
-// Run one frame of sim + render (no UI panel). T9/T_total are accumulated by
-// the caller via the returned wall-clock split.
 static void benchStepAndRender(AppWindow& w, FlipFluid& f, bool record) {
     auto frameStart = std::chrono::steady_clock::now();
     f.simulate(scene.dt, scene.gravity, scene.flipRatio,
@@ -357,7 +339,6 @@ static void runBenchmark(AppWindow& w, int warmup, int measure,
                          const char* csvPath, int onlyRes) {
     static const int resolutions[] = {50, 100, 150, 200};
 
-    // Fixed config per assignment §4.2.
     scene.gravity          = -9.81f;
     scene.compensateDrift  = true;
     scene.separateParticles = true;
@@ -381,17 +362,15 @@ static void runBenchmark(AppWindow& w, int warmup, int measure,
         if (!w.running) break;
         if (onlyRes > 0 && res != onlyRes) continue;
         scene.resolution = res;
-        setupScene();                 // rebuilds fluid; obstacle carved at (3,2)
+        setupScene();
         FlipFluid& f = *scene.fluid;
-        scene.obstacleVelX = 0.0f;    // static obstacle → deterministic
+        scene.obstacleVelX = 0.0f;
         scene.obstacleVelY = 0.0f;
 
-        std::printf("[bench-cpu] res=%d particles=%d warmup=%d measure=%d ...\n",
-                    res, f.numParticles, warmup, measure);
+        std::printf("benchmarking res=%d...\n", res);
 
         int total = warmup + measure;
         for (int frame = 0; frame < total && w.running; ++frame) {
-            // Pump events so the window stays responsive; allow Q/Esc to abort.
             while (XPending(w.dpy) > 0) {
                 XEvent e; XNextEvent(w.dpy, &e);
                 if (e.type == ClientMessage) {
@@ -401,7 +380,7 @@ static void runBenchmark(AppWindow& w, int warmup, int measure,
                     if (ks == XK_q || ks == XK_Q || ks == XK_Escape) w.running = false;
                 }
             }
-            if (frame == warmup) f.resetTiming();   // discard warmup, start measuring
+            if (frame == warmup) f.resetTiming();
             benchStepAndRender(w, f, frame >= warmup);
         }
 
@@ -418,10 +397,8 @@ static void runBenchmark(AppWindow& w, int warmup, int measure,
         }
     }
 
-    if (csv) { std::fclose(csv); std::printf("[bench-cpu] wrote %s\n", csvPath); }
+    if (csv) { std::fclose(csv); std::printf("wrote results to %s\n", csvPath); }
 }
-
-// --------------------------- main -------------------------------------------
 
 int main(int argc, char** argv) {
     bool noVsync = false;

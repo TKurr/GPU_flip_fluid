@@ -13,7 +13,7 @@
 
 constexpr int GFLUID=0, GAIR=1, GSOLID=2;
 
-// ── device helpers ─────────────────────────────────────────────
+// helpers for device
 __device__ inline float clampf_d(float x, float lo, float hi) {
     return fmaxf(lo, fminf(hi, x));
 }
@@ -21,7 +21,7 @@ __device__ inline int clampi_d(int x, int lo, int hi) {
     return max(lo, min(hi, x));
 }
 
-// ── T1: integrate ──────────────────────────────────────────────
+// integrate particles
 __global__ void k_integrate(float* px, float* py, float* vx, float* vy,
                             int n, float dt, float gravity) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -31,7 +31,7 @@ __global__ void k_integrate(float* px, float* py, float* vx, float* vy,
     py[i] += vy[i] * dt;
 }
 
-// ── T3: collisions ────────────────────────────────────────────
+// handle collisions with walls and obstacle
 __global__ void k_collisions(float* px, float* py, float* vx, float* vy,
                              int n, float obsX, float obsY, float obsR,
                              float obsVX, float obsVY, float pRad,
@@ -52,7 +52,7 @@ __global__ void k_collisions(float* px, float* py, float* vx, float* vy,
     px[i] = x; py[i] = y;
 }
 
-// ── Spatial hash: histogram ───────────────────────────────────
+// count particles in each cell for hashing
 __global__ void k_hashCount(const float* px, const float* py, int n,
                             int* counts, float pInvSp, int pNX, int pNY) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -62,7 +62,7 @@ __global__ void k_hashCount(const float* px, const float* py, int n,
     atomicAdd(&counts[xi*pNY+yi], 1);
 }
 
-// ── Spatial hash: scatter particles into sorted order ─────────
+// put particle ids into sorted order
 __global__ void k_hashScatter(const float* px, const float* py, int n,
                               int* first, int* ids,
                               float pInvSp, int pNX, int pNY) {
@@ -74,7 +74,7 @@ __global__ void k_hashScatter(const float* px, const float* py, int n,
     ids[slot] = i;
 }
 
-// ── T2: push particles apart (one iteration) ─────────────────
+// push particles apart to avoid overlap
 __global__ void k_separate(float* px, float* py,
                            float* cr, float* cg, float* cb,
                            const int* first, const int* ids,
@@ -105,7 +105,7 @@ __global__ void k_separate(float* px, float* py,
                 float s = 0.5f*(minDist-d)/d;
                 dxA -= dx*s; dyA -= dy*s;
                 
-                // Color diffusion (symmetric)
+                // Color diffusion
                 float c1r = cr[idn], c1g = cg[idn], c1b = cb[idn];
                 float avgR = (c0r + c1r) * 0.5f;
                 float avgG = (c0g + c1g) * 0.5f;
@@ -123,7 +123,7 @@ __global__ void k_separate(float* px, float* py,
     atomicAdd(&cb[i], dbA);
 }
 
-// ── T5: particle density (scatter) ────────────────────────────
+// compute particle density for each cell
 __global__ void k_particleDensity(const float* px, const float* py, int n,
                                   float* pDens, float hh, float h1, float h2,
                                   int fNX, int fNY) {
@@ -143,7 +143,7 @@ __global__ void k_particleDensity(const float* px, const float* py, int n,
     if(x0<fNX&&y1<fNY) atomicAdd(&pDens[x0*nn+y1], sx*ty);
 }
 
-// ── classify cells ────────────────────────────────────────────
+// set cell types
 __global__ void k_classifyInit(int* ct, const float* s, int nCells) {
     int i = blockIdx.x*blockDim.x+threadIdx.x;
     if (i >= nCells) return;
@@ -156,10 +156,10 @@ __global__ void k_classifyParticles(int* ct, const float* px, const float* py,
     int xi = clampi_d((int)floorf(px[i]*fInvSp), 0, fNX-1);
     int yi = clampi_d((int)floorf(py[i]*fInvSp), 0, fNY-1);
     int c = xi*fNY+yi;
-    if (ct[c] == GAIR) ct[c] = GFLUID; // race OK: both write same value
+    if (ct[c] == GAIR) ct[c] = GFLUID; // fluid if particle is inside
 }
 
-// ── save prev velocities ─────────────────────────────────────
+// save velocities before update
 __global__ void k_savePrev(float* u, float* v, float* du, float* dv,
                            float* pu, float* pv, int nCells) {
     int i = blockIdx.x*blockDim.x+threadIdx.x;
@@ -167,7 +167,7 @@ __global__ void k_savePrev(float* u, float* v, float* du, float* dv,
     pu[i]=u[i]; pv[i]=v[i]; du[i]=0; dv[i]=0; u[i]=0; v[i]=0;
 }
 
-// ── P2G scatter (one component) ──────────────────────────────
+// transfer particle velocities to grid
 __global__ void k_p2g(const float* px, const float* py,
                       const float* pvel, float* fld, float* fldD,
                       int n, int comp, float hh, float h1, float h2,
@@ -191,14 +191,14 @@ __global__ void k_p2g(const float* px, const float* py,
     atomicAdd(&fld[x0*nn+y1], pv*d3); atomicAdd(&fldD[x0*nn+y1], d3);
 }
 
-// ── P2G normalize ────────────────────────────────────────────
+// normalize grid velocities
 __global__ void k_p2gNorm(float* fld, const float* fldD, int nCells) {
     int i = blockIdx.x*blockDim.x+threadIdx.x;
     if (i >= nCells) return;
     if (fldD[i] > 0.0f) fld[i] /= fldD[i];
 }
 
-// ── restore solid cells ──────────────────────────────────────
+// restore velocities for solid cells
 __global__ void k_restoreSolid(float* u, float* v, const float* pu, const float* pv,
                                const int* ct, int fNX, int fNY) {
     int idx = blockIdx.x*blockDim.x+threadIdx.x;
@@ -211,10 +211,7 @@ __global__ void k_restoreSolid(float* u, float* v, const float* pu, const float*
     if (solid || (j>0 && ct[i*n+j-1]==GSOLID))   v[i*n+j] = pv[i*n+j];
 }
 
-// ── T6: Red-Black Gauss-Seidel pressure solver (one color per launch) ──
-// Red-black coloring makes each u/v/p write owned by exactly one cell per
-// launch, so the direct (non-atomic) writes below are race-free. Replaces a
-// lexicographic Gauss-Seidel sweep on the CPU; converges to the same solution.
+// red-black pressure solver
 __global__ void k_jacobiRB(float* u, float* v, float* p,
                            const float* s, const int* ct,
                            const float* pDens, float rest, int cd,
@@ -245,7 +242,7 @@ __global__ void k_jacobiRB(float* u, float* v, float* p,
     v[top]    += sy1*pVal;
 }
 
-// ── T7: G2P (one component) ──────────────────────────────────
+// grid to particle transfer
 __global__ void k_g2p(const float* px, const float* py,
                       float* pvel, const float* fld, const float* pfld,
                       const int* ct, int n_particles, int comp, float flipR,
@@ -278,7 +275,7 @@ __global__ void k_g2p(const float* px, const float* py,
     }
 }
 
-// ── T8: particle colors ──────────────────────────────────────
+// update particle colors
 __global__ void k_updateParticleColors(float* cr, float* cg, float* cb,
                                        const float* px, const float* py,
                                        const float* pDens, float d0,
@@ -297,7 +294,7 @@ __global__ void k_updateParticleColors(float* cr, float* cg, float* cb,
     }
 }
 
-// ── T8: cell colors ──────────────────────────────────────────
+// color cells for drawing
 __global__ void k_updateCellColors(float* cc, const int* ct,
                                    const float* pDens, float rest,
                                    int nCells) {
@@ -308,7 +305,7 @@ __global__ void k_updateCellColors(float* cc, const int* ct,
     else if (ct[i]==GFLUID) {
         float d = pDens[i];
         if (rest>0) d /= rest;
-        // sci color
+        // sci color scheme
         float val = fminf(fmaxf(d, 0.0f), 1.9999f);
         float dd = 2.0f;
         val = val / dd;
@@ -324,7 +321,7 @@ __global__ void k_updateCellColors(float* cc, const int* ct,
     }
 }
 
-// ── obstacle carving ─────────────────────────────────────────
+// carve obstacle out of the fluid grid
 __global__ void k_carveObstacle(float* s, float* u, float* v,
                                 float ox, float oy, float orad,
                                 float ovx, float ovy,
@@ -345,9 +342,7 @@ __global__ void k_carveObstacle(float* s, float* u, float* v,
     }
 }
 
-// ── parallel inclusive scan (Hillis-Steele, 3-phase multi-block) ──
-// Phase 1: each block inclusive-scans its BLK slice into `out` and writes the
-// block total to blockSums[blockIdx]. Launch with shared mem = blockDim*4 bytes.
+// parallel prefix scan using hillis-steele
 __global__ void k_scanBlockInclusive(const int* in, int* out,
                                     int* blockSums, int n) {
     extern __shared__ int tmp[];
@@ -362,32 +357,30 @@ __global__ void k_scanBlockInclusive(const int* in, int* out,
         __syncthreads();
     }
     if (gid < n) out[gid] = tmp[tid];
-    // Last thread holds the block's total (out-of-range lanes contributed 0).
     if (tid == blockDim.x - 1 && blockSums) blockSums[blockIdx.x] = tmp[tid];
 }
 
-// Phase 3: add each block's exclusive offset (= inclusive-scanned blockSums of
-// the previous block) to every element of the block.
+// add block offsets for final scan result
 __global__ void k_addBlockOffsets(int* out, const int* scannedBlockSums, int n) {
     int gid = blockIdx.x * blockDim.x + threadIdx.x;
     if (gid >= n) return;
     if (blockIdx.x > 0) out[gid] += scannedBlockSums[blockIdx.x - 1];
 }
 
-// ── zero int array ───────────────────────────────────────────
+// zero out integer arrays
 __global__ void k_zeroInt(int* arr, int n) {
     int i = blockIdx.x*blockDim.x+threadIdx.x;
     if (i < n) arr[i] = 0;
 }
+// zero out float arrays
 __global__ void k_zeroFloat(float* arr, int n) {
     int i = blockIdx.x*blockDim.x+threadIdx.x;
     if (i < n) arr[i] = 0.0f;
 }
 
-// ── reduction for rest density ───────────────────────────────
+// sum up fluid density for rest density calculation
 __global__ void k_sumFluidDensity(const float* pDens, const int* ct,
                                   int nCells, float* outSum, int* outCount) {
-    // Simple atomic approach
     int i = blockIdx.x*blockDim.x+threadIdx.x;
     if (i >= nCells) return;
     if (ct[i] == GFLUID) {
@@ -396,7 +389,7 @@ __global__ void k_sumFluidDensity(const float* pDens, const int* ct,
     }
 }
 
-// zero pressure + save prev for pressure solve
+// setup for pressure solver
 __global__ void k_prepPressure(float* p, float* prevU, float* prevV,
                                const float* u, const float* v, int nCells) {
     int i = blockIdx.x*blockDim.x+threadIdx.x;
@@ -406,9 +399,7 @@ __global__ void k_prepPressure(float* p, float* prevU, float* prevV,
     prevV[i] = v[i];
 }
 
-// ── B1 interop: pack SoA particle data straight into mapped GL VBOs ──
-// Writes into buffers owned by OpenGL (mapped via cudaGraphicsMapResources),
-// so rendering reads them with zero device→host transfer.
+// pack particle data for opengl interop
 __global__ void k_packParticles(const float* px, const float* py,
                                 const float* cr, const float* cg, const float* cb,
                                 float2* outPos, float3* outCol, int n) {

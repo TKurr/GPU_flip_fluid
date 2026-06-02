@@ -74,7 +74,7 @@ void FlipFluid::integrateParticles(float dt, float gravity) {
 void FlipFluid::pushParticlesApart(int numIters) {
     const float colorDiffusionCoeff = 0.001f;
 
-    // count particles per cell
+    // count how many particles are in each cell
     std::fill(numCellParticles.begin(), numCellParticles.end(), 0);
     for (int i = 0; i < numParticles; ++i) {
         int xi = clampi(int(std::floor(particlePosX[i] * pInvSpacing)), 0, pNumX - 1);
@@ -82,8 +82,7 @@ void FlipFluid::pushParticlesApart(int numIters) {
         numCellParticles[xi * pNumY + yi] += 1;
     }
 
-    // prefix sum (note: matches JS — firstCellParticle[i] holds sum thru i,
-    // then we decrement during the fill pass).
+    // prefix sum for indexing
     int first = 0;
     for (int i = 0; i < pNumCells; ++i) {
         first += numCellParticles[i];
@@ -91,7 +90,7 @@ void FlipFluid::pushParticlesApart(int numIters) {
     }
     firstCellParticle[pNumCells] = first;
 
-    // fill cell -> particles
+    // map particles to cells
     for (int i = 0; i < numParticles; ++i) {
         int xi = clampi(int(std::floor(particlePosX[i] * pInvSpacing)), 0, pNumX - 1);
         int yi = clampi(int(std::floor(particlePosY[i] * pInvSpacing)), 0, pNumY - 1);
@@ -100,7 +99,7 @@ void FlipFluid::pushParticlesApart(int numIters) {
         cellParticleIds[firstCellParticle[cellNr]] = i;
     }
 
-    // separate
+    // separate particles to avoid overlapping
     const float minDist = 2.0f * particleRadius;
     const float minDist2 = minDist * minDist;
 
@@ -140,7 +139,7 @@ void FlipFluid::pushParticlesApart(int numIters) {
                         particlePosX[idn] += dx;
                         particlePosY[idn] += dy;
 
-                        // diffuse colours
+                        // simple color diffusion
                         float c0r = particleColorR[i],  c1r = particleColorR[idn];
                         float c0g = particleColorG[i],  c1g = particleColorG[idn];
                         float c0b = particleColorB[i],  c1b = particleColorB[idn];
@@ -154,7 +153,7 @@ void FlipFluid::pushParticlesApart(int numIters) {
                         particleColorB[i]   = c0b + (cb - c0b) * colorDiffusionCoeff;
                         particleColorB[idn] = c1b + (cb - c1b) * colorDiffusionCoeff;
 
-                        // refresh cached px/py for next neighbour
+                        // update pos for next neighbor check
                         px = particlePosX[i];
                         py = particlePosY[i];
                     }
@@ -422,7 +421,7 @@ void FlipFluid::transferVelocities(bool toGrid, float flipRatio) {
 void FlipFluid::solveIncompressibility(int numIters, float dt,
                                        float overRelaxation, bool compensateDrift)
 {
-    // zero pressure, save prev velocities
+    // set pressure to 0 and save old velocities
     for (int i = 0; i < fNumCells; ++i) {
         p[i] = 0.0f;
         prevU[i] = u[i];
@@ -435,8 +434,7 @@ void FlipFluid::solveIncompressibility(int numIters, float dt,
     int   cd = compensateDrift ? 1 : 0;
 
     for (int iter = 0; iter < numIters; ++iter) {
-        // Gauss-Seidel sweep matching the JS ordering exactly: i in [1, fNumX-1),
-        // j in [1, fNumY-1).
+        // loop through the grid and solve for pressure
         for (int i = 1; i < fNumX - 1; ++i) {
             for (int j = 1; j < fNumY - 1; ++j) {
                 if (cellType[i * n + j] != FLUID_CELL) continue;
