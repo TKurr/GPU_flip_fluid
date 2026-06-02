@@ -60,13 +60,13 @@ python3 tools/plot_bench.py --cpu bench_cpu.csv --cuda bench_cuda.csv --outdir p
 ---
 
 ## 5. Verifikasi visual (port CUDA terlihat benar)  →  Laporan §"Kebenaran"
+Luncurkan kedua build berdampingan (resolusi sama, langsung jalan):
 ```bash
-./flip          # tekan SPACE, biarkan beberapa detik
-./flip_cuda     # tekan SPACE, bandingkan tampilannya
+bash tools/compare_cpu_gpu.sh 100      # atau RES=200 bash tools/compare_cpu_gpu.sh
 ```
-- [ ] 📸 **SS-08**: window `flip` (CPU) saat fluida bergerak
-- [ ] 📸 **SS-09**: window `flip_cuda` (GPU) — bentuk fluida mirip CPU,
-      tidak meledak/NaN
+- [ ] 📸 **SS-08/09**: dua window berdampingan (CPU kiri, CUDA kanan) — bentuk
+      fluida mirip, tidak meledak/NaN. (Atau rekam jadi `docs/cpu-vs-gpu-side-by-side.mp4`
+      + still `docs/cpu-vs-gpu-still.png`.)
 
 ---
 

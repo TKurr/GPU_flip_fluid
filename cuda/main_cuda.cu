@@ -595,24 +595,31 @@ static void runBenchmark(AppWindow& w, int warmup, int measure,
 int main(int argc, char** argv) {
     bool noVsync = false;
     bool bench = false;
+    bool autostart = false;
+    int  forceRes = 0;
     int  benchWarmup = 60, benchMeasure = 600, benchOnlyRes = 0;
     const char* benchCsv = "bench_cuda.csv";
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--no-vsync") == 0) noVsync = true;
         else if (std::strcmp(argv[i], "--bench") == 0) { bench = true; noVsync = true; }
         else if (std::strcmp(argv[i], "--interop") == 0) g_useInterop = true;
+        else if (std::strcmp(argv[i], "--autostart") == 0) autostart = true;
+        else if (std::strcmp(argv[i], "--res") == 0 && i + 1 < argc) forceRes = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) benchWarmup = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) benchMeasure = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--only-res") == 0 && i + 1 < argc) benchOnlyRes = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--csv") == 0 && i + 1 < argc) benchCsv = argv[++i];
         else if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0) {
-            std::printf("Usage: %s [--no-vsync] [--bench] [--interop] [--warmup N] [--frames N] [--only-res N] [--csv FILE]\n", argv[0]);
-            std::printf("  --bench     sweep res {50,100,150,200}, discard warmup, average measure frames, write CSV\n");
-            std::printf("  --interop   render via CUDA-OpenGL VBO interop (no device->host copy)\n");
-            std::printf("  --only-res  benchmark just one resolution (e.g. for Nsight profiling)\n");
+            std::printf("Usage: %s [--no-vsync] [--bench] [--interop] [--autostart] [--res N] [--warmup N] [--frames N] [--only-res N] [--csv FILE]\n", argv[0]);
+            std::printf("  --bench      sweep res {50,100,150,200}, discard warmup, average measure frames, write CSV\n");
+            std::printf("  --interop    render via CUDA-OpenGL VBO interop (no device->host copy)\n");
+            std::printf("  --autostart  start unpaused (for side-by-side comparison)\n");
+            std::printf("  --res N      set grid resolution at startup\n");
+            std::printf("  --only-res   benchmark just one resolution (e.g. for Nsight profiling)\n");
             return 0;
         }
     }
+    if (forceRes > 0) scene.resolution = forceRes;
 
     std::printf("[flip-cuda] starting (GPU sim, GPU render)\n");
 
@@ -635,7 +642,7 @@ int main(int argc, char** argv) {
     }
 
     setupScene();                // allocates CUDA buffers on the selected device
-    scene.paused = true;
+    scene.paused = !autostart;
 
     // Automated benchmark mode: run the sweep, then exit.
     if (bench) {

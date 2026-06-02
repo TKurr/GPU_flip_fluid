@@ -33,6 +33,20 @@ make flip_validate # headless CPU-vs-CUDA numerical validation
 Controls: **LMB drag** = move obstacle, **SPACE/P** = pause, **G** = grid,
 **R** = reset, **Q/Esc** = quit. `flip_cuda` also prints timing on **T**.
 
+Useful flags: `--autostart` (begin unpaused) and `--res N` (set resolution at
+startup).
+
+### Qualitative CPU-vs-CUDA comparison
+
+Launch both builds side by side at the same resolution (both unpaused):
+
+```bash
+bash tools/compare_cpu_gpu.sh 100      # or: RES=200 bash tools/compare_cpu_gpu.sh
+```
+
+The fluid should look the same in both windows (small differences are expected;
+see numerical validation). Install `wmctrl` to auto-arrange the windows.
+
 `--interop` (CUDA only) renders particles straight from a CUDA-mapped OpenGL VBO
 (`cudaGraphicsMapResources`), avoiding the per-frame device→host copy.
 

@@ -403,26 +403,33 @@ static void runBenchmark(AppWindow& w, int warmup, int measure,
 int main(int argc, char** argv) {
     bool noVsync = false;
     bool bench = false;
+    bool autostart = false;
+    int  forceRes = 0;
     int  benchWarmup = 60, benchMeasure = 600, benchOnlyRes = 0;
     const char* benchCsv = "bench_cpu.csv";
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--no-vsync") == 0) noVsync = true;
         else if (std::strcmp(argv[i], "--bench") == 0) { bench = true; noVsync = true; }
+        else if (std::strcmp(argv[i], "--autostart") == 0) autostart = true;
+        else if (std::strcmp(argv[i], "--res") == 0 && i + 1 < argc) forceRes = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) benchWarmup = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) benchMeasure = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--only-res") == 0 && i + 1 < argc) benchOnlyRes = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--csv") == 0 && i + 1 < argc) benchCsv = argv[++i];
         else if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0) {
-            std::printf("Usage: %s [--no-vsync] [--bench] [--warmup N] [--frames N] [--only-res N] [--csv FILE]\n", argv[0]);
-            std::printf("  --bench   sweep res {50,100,150,200}, discard warmup, average measure frames, write CSV\n");
+            std::printf("Usage: %s [--no-vsync] [--bench] [--autostart] [--res N] [--warmup N] [--frames N] [--only-res N] [--csv FILE]\n", argv[0]);
+            std::printf("  --bench      sweep res {50,100,150,200}, discard warmup, average measure frames, write CSV\n");
+            std::printf("  --autostart  start unpaused (for side-by-side comparison)\n");
+            std::printf("  --res N      set grid resolution at startup\n");
             std::printf("Controls: LMB=move obstacle, SPACE/P=pause, G=grid, R=reset, Q/Esc=quit\n");
             return 0;
         }
     }
+    if (forceRes > 0) scene.resolution = forceRes;
 
     std::printf("[flip-cpp] starting (CPU sim, GPU render)\n");
     setupScene();
-    scene.paused = true;
+    scene.paused = !autostart;
 
     AppWindow w;
     if (!createWindow(w, "FLIP Fluid (C++ CPU sim)")) return 1;

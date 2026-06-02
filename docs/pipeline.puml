@@ -1,0 +1,55 @@
+@startuml
+title FLIP Fluid Simulator — Pipeline Kernel CUDA (per frame)
+
+start
+:Frame mulai;
+
+while (substep < numSubSteps ?) is (ya)
+
+  :**T1 integrate**\nk_integrate;
+
+  partition "**T2 pushParticlesApart**" {
+    :k_zeroInt;
+    :k_hashCount  (histogram, atomicAdd);
+    :scan paralel 3-fase\nk_scanBlockInclusive -> k_addBlockOffsets;
+    :k_hashScatter  (atomicSub);
+    while (iter < numParticleIters ?) is (ya)
+      :k_separate;
+    endwhile (selesai)
+  }
+
+  :**T3 collisions**\nk_collisions;
+
+  partition "**T4 transferVelocities (P2G)**" {
+    :k_savePrev;
+    :k_classifyInit + k_classifyParticles;
+    :k_p2g x2  (atomicAdd scatter -> MAC grid);
+    :k_p2gNorm x2;
+    :k_restoreSolid;
+  }
+
+  partition "**T5 updateParticleDensity**" {
+    :k_zeroFloat -> k_particleDensity  (atomicAdd);
+    :k_sumFluidDensity  (reduksi rest density, frame-1 saja);
+  }
+
+  partition "**T6 solveIncompressibility**" {
+    :k_prepPressure;
+    while (iter < numPressureIters ?) is (ya)
+      :k_jacobiRB  (Red-Black, warna 0);
+      :k_jacobiRB  (Red-Black, warna 1);
+    endwhile (selesai)
+  }
+
+  :**T7 transferVelocities (G2P)**\nk_g2p x2  (gather grid -> partikel);
+
+endwhile (selesai)
+
+:**T8 colors**\nk_updateParticleColors + k_updateCellColors;
+
+:**T10 transfer**\ncudaMemcpy D2H  --atau--  map -> k_packParticles -> unmap (interop);
+
+:**T9 render**\ndrawGrid + drawParticles + drawObstacle + swapBuffers;
+
+stop
+@enduml
