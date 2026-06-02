@@ -2,9 +2,11 @@
 SPEK.md
 flip_cuda
 flip
+flip_validate
 
 # benchmark / profiling outputs
 nsight/
 *.nsys-rep
 *.ncu-rep
 __pycache__/
+venv/
