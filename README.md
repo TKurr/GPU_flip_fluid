@@ -63,6 +63,48 @@ bash tools/profile_nsight.sh          # defaults to res 200
 RES=150 bash tools/profile_nsight.sh  # other resolution
 ```
 
+### Nsight profiling (bonus §4.4) — step by step
+
+1. **Check the tools** are on PATH:
+   ```bash
+   which nsys ncu
+   ```
+   If missing, install them (Arch: `sudo pacman -S nsight-systems nsight-compute`)
+   or use the copies bundled with the CUDA toolkit (often `/opt/cuda/bin`).
+
+2. **Allow GPU performance counters** (needed by `ncu` only). The NVIDIA driver
+   restricts counters to admins by default, so either run `ncu` with `sudo`, or
+   open access for the session:
+   ```bash
+   sudo sh -c 'echo 0 > /proc/sys/kernel/perf_event_paranoid'
+   ```
+   An `ERR_NVGPUCTRPERM` error means this step is required.
+
+3. **Run** (the app opens a GL window — needs an active display):
+   ```bash
+   make flip_cuda
+   bash tools/profile_nsight.sh            # res 200
+   RES=150 bash tools/profile_nsight.sh    # another resolution
+   sudo RES=200 bash tools/profile_nsight.sh   # if ncu needs root
+   ```
+   - `nsys` profiles `--only-res 200 --warmup 10 --frames 30` →
+     `nsight/flip_cuda_timeline_res200.nsys-rep`
+   - `ncu` profiles `k_jacobiRB` (slow) + `k_p2g` (comparison),
+     `--launch-count 4`, tiny frame count (ncu replays each kernel, so it is
+     slow) → `nsight/flip_cuda_ncu_res200.ncu-rep`. Metrics captured: compute
+     throughput, DRAM throughput, occupancy, branch efficiency, global ld/st
+     coalescing.
+
+4. **View results**:
+   ```bash
+   nsys-ui nsight/flip_cuda_timeline_res200.nsys-rep
+   ncu-ui  nsight/flip_cuda_ncu_res200.ncu-rep
+   # text summary instead of GUI:
+   ncu --import nsight/flip_cuda_ncu_res200.ncu-rep --page details | less
+   ```
+   Compare `sm__throughput` vs `dram__throughput` per kernel to conclude whether
+   it is **compute-bound** or **memory-bound**.
+
 ## Timing stages
 
 | Code | Stage |
