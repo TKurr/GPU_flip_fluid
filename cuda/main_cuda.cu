@@ -267,14 +267,45 @@ static bool ensureInterop(FlipFluidCUDA* f) {
     p_glBufferData(GL_ARRAY_BUFFER, (ptrdiff_t)cap * 3 * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
     p_glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-    if (cudaGraphicsGLRegisterBuffer(&g_resPos, g_vboPos, cudaGraphicsRegisterFlagsWriteDiscard) != cudaSuccess ||
-        cudaGraphicsGLRegisterBuffer(&g_resCol, g_vboCol, cudaGraphicsRegisterFlagsWriteDiscard) != cudaSuccess) {
-        fprintf(stderr, "[interop] cudaGraphicsGLRegisterBuffer failed; falling back to D2H\n");
+    cudaError_t e1 = cudaGraphicsGLRegisterBuffer(&g_resPos, g_vboPos, cudaGraphicsRegisterFlagsWriteDiscard);
+    cudaError_t e2 = (e1 == cudaSuccess)
+        ? cudaGraphicsGLRegisterBuffer(&g_resCol, g_vboCol, cudaGraphicsRegisterFlagsWriteDiscard)
+        : e1;
+    if (e1 != cudaSuccess || e2 != cudaSuccess) {
+        cudaError_t err = (e1 != cudaSuccess) ? e1 : e2;
+        fprintf(stderr, "[interop] cudaGraphicsGLRegisterBuffer failed: %s — falling back to D2H.\n"
+                        "          (The OpenGL context is probably not on the NVIDIA GPU. On an\n"
+                        "           Optimus/PRIME laptop run with:  prime-run ./flip_cuda --interop)\n",
+                cudaGetErrorString(err));
+        cudaGetLastError();          // clear the sticky error
         cleanupInterop();
         return false;
     }
     g_interopCapacity = cap;
     return true;
+}
+
+// Make the CUDA runtime use the SAME device the current GL context renders on,
+// so buffers registered for interop live on that device. Must be called while
+// the GL context is current and BEFORE any CUDA allocation (i.e. before the
+// sim is built). Disables interop if GL is not on a CUDA device.
+static void selectInteropDevice() {
+    unsigned int n = 0;
+    int devs[8];
+    cudaError_t e = cudaGLGetDevices(&n, devs, 8, cudaGLDeviceListAll);
+    if (e == cudaSuccess && n > 0) {
+        cudaSetDevice(devs[0]);
+        cudaDeviceProp p;
+        if (cudaGetDeviceProperties(&p, devs[0]) == cudaSuccess)
+            std::printf("[interop] GL context maps to CUDA device %d (%s)\n", devs[0], p.name);
+    } else {
+        fprintf(stderr, "[interop] current GL context is NOT on an NVIDIA CUDA device "
+                        "(cudaGLGetDevices: %s).\n"
+                        "          Interop disabled. On Optimus/PRIME run: prime-run ./flip_cuda --interop\n",
+                cudaGetErrorString(e));
+        cudaGetLastError();
+        g_useInterop = false;
+    }
 }
 
 // Map the VBOs, pack particle data into them with a kernel, unmap. This is the
@@ -559,9 +590,11 @@ int main(int argc, char** argv) {
     }
 
     std::printf("[flip-cuda] starting (GPU sim, GPU render)\n");
-    setupScene();
-    scene.paused = true;
 
+    // Create the GL context FIRST, so we can bind the CUDA device to the GPU
+    // that OpenGL renders on before allocating any device memory. Otherwise the
+    // sim lands on CUDA device 0 and interop registration fails on multi-GPU /
+    // Optimus systems.
     AppWindow w;
     if (!createWindow(w, "FLIP Fluid (CUDA GPU sim)")) return 1;
 
@@ -571,7 +604,13 @@ int main(int argc, char** argv) {
         if (pfn) pfn(0);
     }
 
-    if (g_useInterop) std::printf("[flip-cuda] CUDA-OpenGL interop enabled\n");
+    if (g_useInterop) {
+        selectInteropDevice();   // bind CUDA to the GL device (or disable interop)
+        if (g_useInterop) std::printf("[flip-cuda] CUDA-OpenGL interop enabled\n");
+    }
+
+    setupScene();                // allocates CUDA buffers on the selected device
+    scene.paused = true;
 
     // Automated benchmark mode: run the sweep, then exit.
     if (bench) {

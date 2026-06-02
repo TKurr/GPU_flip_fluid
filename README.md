@@ -36,6 +36,17 @@ Controls: **LMB drag** = move obstacle, **SPACE/P** = pause, **G** = grid,
 `--interop` (CUDA only) renders particles straight from a CUDA-mapped OpenGL VBO
 (`cudaGraphicsMapResources`), avoiding the per-frame device→host copy.
 
+> Interop needs the **OpenGL context to run on the same NVIDIA GPU** as CUDA.
+> On a laptop with switchable graphics (Optimus/PRIME) GLX defaults to the
+> iGPU (or llvmpipe), so interop registration fails and it falls back to D2H.
+> Force GL onto the NVIDIA GPU:
+> ```bash
+> prime-run ./flip_cuda --interop
+> # or, without the prime-run wrapper:
+> __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia ./flip_cuda --interop
+> ```
+> Check which GPU drives GL with `glxinfo | grep "OpenGL renderer"`.
+
 ## Benchmark mode
 
 Runs the assignment benchmark matrix automatically, then exits:
