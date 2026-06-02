@@ -44,12 +44,24 @@ Runs the assignment benchmark matrix automatically, then exits:
 ./flip_cuda --bench [--interop]   [--csv bench_cuda.csv]
 ```
 
-- Sweeps grid resolutions **{50, 100, 150, 200}**.
+- Sweeps grid resolutions **{50, 100, 150, 200}** (or one via `--only-res N`).
 - Discards `--warmup` frames (default 60), averages the next `--frames` (default 600).
 - Fixed config: gravity ON, separateParticles ON, compensateDrift ON,
   flipRatio 0.9, obstacle static at (3.0, 2.0), vsync forced off.
 - Prints system info + `numPressureIters`/`numSubSteps`, and writes a CSV with
   per-stage timings T1..T10 and T_total (one row per resolution).
+
+## Analysis & profiling tools
+
+```bash
+# Plots from the benchmark CSVs (needs: pip install matplotlib)
+python3 tools/plot_bench.py --cpu bench_cpu.csv --cuda bench_cuda.csv --outdir plots
+#   -> plots/total_vs_res.png, speedup.png, stages_cpu.png, stages_cuda.png
+
+# Bonus §4.4 — Nsight timeline + per-kernel metrics (needs nsys/ncu + NVIDIA GPU)
+bash tools/profile_nsight.sh          # defaults to res 200
+RES=150 bash tools/profile_nsight.sh  # other resolution
+```
 
 ## Timing stages
 

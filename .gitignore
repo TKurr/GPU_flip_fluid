@@ -2,3 +2,11 @@
 SPEK.md
 flip_cuda
 flip
+
+# benchmark / profiling outputs
+bench_*.csv
+plots/
+nsight/
+*.nsys-rep
+*.ncu-rep
+__pycache__/

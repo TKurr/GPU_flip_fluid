@@ -470,7 +470,8 @@ static void benchStepAndRender(AppWindow& w, FlipFluidCUDA* f, bool record) {
     }
 }
 
-static void runBenchmark(AppWindow& w, int warmup, int measure, const char* csvPath) {
+static void runBenchmark(AppWindow& w, int warmup, int measure,
+                         const char* csvPath, int onlyRes) {
     static const int resolutions[] = {50, 100, 150, 200};
 
     scene.gravity           = -9.81f;
@@ -494,6 +495,7 @@ static void runBenchmark(AppWindow& w, int warmup, int measure, const char* csvP
 
     for (int res : resolutions) {
         if (!w.running) break;
+        if (onlyRes > 0 && res != onlyRes) continue;
         scene.resolution = res;
         setupScene();                 // rebuilds fluid; obstacle carved at (3,2)
         FlipFluidCUDA* f = scene.fluid;
@@ -538,7 +540,7 @@ static void runBenchmark(AppWindow& w, int warmup, int measure, const char* csvP
 int main(int argc, char** argv) {
     bool noVsync = false;
     bool bench = false;
-    int  benchWarmup = 60, benchMeasure = 600;
+    int  benchWarmup = 60, benchMeasure = 600, benchOnlyRes = 0;
     const char* benchCsv = "bench_cuda.csv";
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--no-vsync") == 0) noVsync = true;
@@ -546,11 +548,13 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--interop") == 0) g_useInterop = true;
         else if (std::strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) benchWarmup = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) benchMeasure = std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "--only-res") == 0 && i + 1 < argc) benchOnlyRes = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--csv") == 0 && i + 1 < argc) benchCsv = argv[++i];
         else if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0) {
-            std::printf("Usage: %s [--no-vsync] [--bench] [--interop] [--warmup N] [--frames N] [--csv FILE]\n", argv[0]);
-            std::printf("  --bench    sweep res {50,100,150,200}, discard warmup, average measure frames, write CSV\n");
-            std::printf("  --interop  render via CUDA-OpenGL VBO interop (no device->host copy)\n");
+            std::printf("Usage: %s [--no-vsync] [--bench] [--interop] [--warmup N] [--frames N] [--only-res N] [--csv FILE]\n", argv[0]);
+            std::printf("  --bench     sweep res {50,100,150,200}, discard warmup, average measure frames, write CSV\n");
+            std::printf("  --interop   render via CUDA-OpenGL VBO interop (no device->host copy)\n");
+            std::printf("  --only-res  benchmark just one resolution (e.g. for Nsight profiling)\n");
             return 0;
         }
     }
@@ -572,7 +576,7 @@ int main(int argc, char** argv) {
 
     // Automated benchmark mode: run the sweep, then exit.
     if (bench) {
-        runBenchmark(w, benchWarmup, benchMeasure, benchCsv);
+        runBenchmark(w, benchWarmup, benchMeasure, benchCsv, benchOnlyRes);
         cleanupInterop();
         if (w.glc) { glXMakeCurrent(w.dpy, None, nullptr); glXDestroyContext(w.dpy, w.glc); }
         if (w.xwin) XDestroyWindow(w.dpy, w.xwin);

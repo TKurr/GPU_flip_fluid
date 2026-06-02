@@ -353,7 +353,8 @@ static void benchStepAndRender(AppWindow& w, FlipFluid& f, bool record) {
     }
 }
 
-static void runBenchmark(AppWindow& w, int warmup, int measure, const char* csvPath) {
+static void runBenchmark(AppWindow& w, int warmup, int measure,
+                         const char* csvPath, int onlyRes) {
     static const int resolutions[] = {50, 100, 150, 200};
 
     // Fixed config per assignment §4.2.
@@ -378,6 +379,7 @@ static void runBenchmark(AppWindow& w, int warmup, int measure, const char* csvP
 
     for (int res : resolutions) {
         if (!w.running) break;
+        if (onlyRes > 0 && res != onlyRes) continue;
         scene.resolution = res;
         setupScene();                 // rebuilds fluid; obstacle carved at (3,2)
         FlipFluid& f = *scene.fluid;
@@ -424,16 +426,17 @@ static void runBenchmark(AppWindow& w, int warmup, int measure, const char* csvP
 int main(int argc, char** argv) {
     bool noVsync = false;
     bool bench = false;
-    int  benchWarmup = 60, benchMeasure = 600;
+    int  benchWarmup = 60, benchMeasure = 600, benchOnlyRes = 0;
     const char* benchCsv = "bench_cpu.csv";
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--no-vsync") == 0) noVsync = true;
         else if (std::strcmp(argv[i], "--bench") == 0) { bench = true; noVsync = true; }
         else if (std::strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) benchWarmup = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) benchMeasure = std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "--only-res") == 0 && i + 1 < argc) benchOnlyRes = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--csv") == 0 && i + 1 < argc) benchCsv = argv[++i];
         else if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0) {
-            std::printf("Usage: %s [--no-vsync] [--bench] [--warmup N] [--frames N] [--csv FILE]\n", argv[0]);
+            std::printf("Usage: %s [--no-vsync] [--bench] [--warmup N] [--frames N] [--only-res N] [--csv FILE]\n", argv[0]);
             std::printf("  --bench   sweep res {50,100,150,200}, discard warmup, average measure frames, write CSV\n");
             std::printf("Controls: LMB=move obstacle, SPACE/P=pause, G=grid, R=reset, Q/Esc=quit\n");
             return 0;
@@ -457,7 +460,7 @@ int main(int argc, char** argv) {
 
     // Automated benchmark mode: run the sweep, then exit (no interactive loop).
     if (bench) {
-        runBenchmark(w, benchWarmup, benchMeasure, benchCsv);
+        runBenchmark(w, benchWarmup, benchMeasure, benchCsv, benchOnlyRes);
         destroyWindow(w);
         delete scene.fluid;
         return 0;
