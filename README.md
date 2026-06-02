@@ -14,9 +14,10 @@ Requires a C++17 compiler, OpenGL/GLX/X11 dev headers, and (for the CUDA build)
 the CUDA toolkit + an NVIDIA GPU.
 
 ```bash
-make flip        # CPU build (no GPU needed)
-make flip_cuda   # CUDA build (needs nvcc + NVIDIA GPU)
-make             # both
+make flip          # CPU build (no GPU needed)
+make flip_cuda     # CUDA build (needs nvcc + NVIDIA GPU)
+make               # both
+make flip_validate # headless CPU-vs-CUDA numerical validation
 ```
 
 > The CUDA build cannot run on machines without an NVIDIA GPU. Use a CUDA-capable
@@ -50,6 +51,17 @@ Runs the assignment benchmark matrix automatically, then exits:
   flipRatio 0.9, obstacle static at (3.0, 2.0), vsync forced off.
 - Prints system info + `numPressureIters`/`numSubSteps`, and writes a CSV with
   per-stage timings T1..T10 and T_total (one row per resolution).
+
+## Numerical validation (CPU vs CUDA)
+
+Runs both backends from an identical initial state and reports max/RMS error
+per field — proof the port is correct despite reordered ops (Gauss-Seidel →
+red-black, sequential scatter → atomic). Headless, no OpenGL.
+
+```bash
+make flip_validate
+./flip_validate --res 100 --frames 5
+```
 
 ## Analysis & profiling tools
 

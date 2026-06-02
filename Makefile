@@ -15,6 +15,10 @@ CU_SRC := cuda/main_cuda.cu cuda/flip_fluid_cuda.cu ui.cpp
 CU_OBJ := cuda/main_cuda.o cuda/flip_fluid_cuda.o ui_cuda.o
 BIN_CU := flip_cuda
 
+# Numerical validation (CPU vs CUDA, headless — no GL/X11)
+VAL_OBJ := cuda/validate.o cuda/flip_fluid_cuda.o flip_fluid.o
+BIN_VAL := flip_validate
+
 all: $(BIN) $(BIN_CU)
 
 # CPU build
@@ -37,7 +41,14 @@ cuda/flip_fluid_cuda.o: cuda/flip_fluid_cuda.cu cuda/flip_fluid_cuda.cuh cuda/ke
 ui_cuda.o: ui.cpp ui.h
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
+# Validation build (links the g++-compiled CPU object with CUDA objects)
+$(BIN_VAL): $(VAL_OBJ)
+	$(NVCC) $(LDFLAGS) -o $@ $^ -lm
+
+cuda/validate.o: cuda/validate.cu cuda/flip_fluid_cuda.cuh cuda/kernels.cuh flip_fluid.h
+	$(NVCC) $(NVCCFLAGS) -c -o $@ $<
+
 clean:
-	rm -f $(OBJ) $(BIN) $(CU_OBJ) $(BIN_CU)
+	rm -f $(OBJ) $(BIN) $(CU_OBJ) $(BIN_CU) cuda/validate.o $(BIN_VAL)
 
 .PHONY: all clean

@@ -97,9 +97,17 @@ ncu-ui  nsight/flip_cuda_ncu_res200.ncu-rep
 
 ---
 
-## 8. (Belum ada tool) Validasi numerik CPU↔CUDA  →  Laporan §"Kebenaran"
-Tool dump-state + error L2/max **belum dibuat**. Kalau dibuat nanti, hasilnya:
-- [ ] 📸 **SS-14**: tabel error L2/max per field (u, v, posisi) setelah N frame
+## 8. Validasi numerik CPU↔CUDA  →  Laporan §"Kebenaran"
+Jalankan CPU & CUDA dari kondisi awal identik, bandingkan error per field
+(headless, tanpa OpenGL):
+```bash
+make flip_validate
+./flip_validate --res 100 --frames 5
+./flip_validate --res 100 --frames 1     # 1 frame: deviasi paling kecil/jelas
+```
+- [ ] 📸 **SS-14**: tabel error max|err| & RMS per field (posisi X/Y, kecepatan
+      X/Y, grid u, v) + nilai relatif. Tunjukkan RMS kecil relatif terhadap
+      magnitudo field → port numerically correct.
 
 ---
 
@@ -109,6 +117,6 @@ Tool dump-state + error L2/max **belum dibuat**. Kalau dibuat nanti, hasilnya:
 | Hardware | SS-01 |
 | Tabel benchmark (§4.2) | SS-02, SS-03, CSV |
 | Analisis skalabilitas/speedup (§4.3) | SS-04, SS-05, SS-06, SS-07 |
-| Kebenaran numerik | SS-08, SS-09 (visual), SS-14 (kuantitatif, jika ada) |
+| Kebenaran numerik | SS-08, SS-09 (visual), SS-14 (kuantitatif) |
 | Bonus B1 interop | SS-10 |
 | Bonus B2 Nsight (§4.4) | SS-11, SS-12, SS-13 |
