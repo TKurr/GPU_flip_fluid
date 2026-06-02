@@ -386,14 +386,19 @@ static void printSystemInfo() {
     cudaDeviceProp prop;
     if (cudaGetDevice(&dev) == cudaSuccess &&
         cudaGetDeviceProperties(&prop, dev) == cudaSuccess) {
+        // memoryClockRate / memoryBusWidth were removed from cudaDeviceProp in
+        // CUDA 13; query them via the stable attribute API instead.
+        int memClockKHz = 0, busWidth = 0;
+        cudaDeviceGetAttribute(&memClockKHz, cudaDevAttrMemoryClockRate, dev);
+        cudaDeviceGetAttribute(&busWidth, cudaDevAttrGlobalMemoryBusWidth, dev);
         // Peak DRAM bandwidth (GB/s) = 2 * memClock(kHz)*1e3 * busWidth/8 / 1e9.
-        double bwGBs = 2.0 * (double)prop.memoryClockRate * 1e3 *
-                       ((double)prop.memoryBusWidth / 8.0) / 1e9;
+        double bwGBs = 2.0 * (double)memClockKHz * 1e3 *
+                       ((double)busWidth / 8.0) / 1e9;
         std::printf("  GPU : %s  (compute capability %d.%d)\n",
                     prop.name, prop.major, prop.minor);
         std::printf("  GPU mem: %.1f GB  bus: %d-bit  memClock: %.0f MHz\n",
                     prop.totalGlobalMem / (1024.0 * 1024.0 * 1024.0),
-                    prop.memoryBusWidth, prop.memoryClockRate / 1000.0);
+                    busWidth, memClockKHz / 1000.0);
         std::printf("  Peak DRAM bandwidth (datasheet est.): %.1f GB/s\n", bwGBs);
         int rt = 0, drv = 0;
         cudaRuntimeGetVersion(&rt); cudaDriverGetVersion(&drv);
