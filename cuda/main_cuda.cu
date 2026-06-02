@@ -290,19 +290,44 @@ static bool ensureInterop(FlipFluidCUDA* f) {
 // the GL context is current and BEFORE any CUDA allocation (i.e. before the
 // sim is built). Disables interop if GL is not on a CUDA device.
 static void selectInteropDevice() {
+    // What is OpenGL actually rendering on? (llvmpipe/Mesa => not the NVIDIA GPU)
+    const char* glVendor   = (const char*)glGetString(GL_VENDOR);
+    const char* glRenderer = (const char*)glGetString(GL_RENDERER);
+    const char* glVersion  = (const char*)glGetString(GL_VERSION);
+    std::printf("[interop] GL_VENDOR   : %s\n", glVendor   ? glVendor   : "(null)");
+    std::printf("[interop] GL_RENDERER : %s\n", glRenderer ? glRenderer : "(null)");
+    std::printf("[interop] GL_VERSION  : %s\n", glVersion  ? glVersion  : "(null)");
+
+    // What CUDA devices exist at all?
+    int total = 0;
+    cudaGetDeviceCount(&total);
+    std::printf("[interop] CUDA devices visible: %d\n", total);
+    for (int d = 0; d < total; ++d) {
+        cudaDeviceProp p;
+        if (cudaGetDeviceProperties(&p, d) == cudaSuccess)
+            std::printf("            [%d] %s (cc %d.%d)\n", d, p.name, p.major, p.minor);
+    }
+
+    // Which CUDA device backs the CURRENT GL context?
     unsigned int n = 0;
     int devs[8];
     cudaError_t e = cudaGLGetDevices(&n, devs, 8, cudaGLDeviceListAll);
     if (e == cudaSuccess && n > 0) {
-        cudaSetDevice(devs[0]);
+        cudaError_t se = cudaSetDevice(devs[0]);
         cudaDeviceProp p;
-        if (cudaGetDeviceProperties(&p, devs[0]) == cudaSuccess)
-            std::printf("[interop] GL context maps to CUDA device %d (%s)\n", devs[0], p.name);
+        cudaGetDeviceProperties(&p, devs[0]);
+        std::printf("[interop] GL context maps to CUDA device %d (%s); cudaSetDevice: %s\n",
+                    devs[0], p.name, cudaGetErrorString(se));
     } else {
-        fprintf(stderr, "[interop] current GL context is NOT on an NVIDIA CUDA device "
-                        "(cudaGLGetDevices: %s).\n"
-                        "          Interop disabled. On Optimus/PRIME run: prime-run ./flip_cuda --interop\n",
-                cudaGetErrorString(e));
+        fprintf(stderr,
+            "[interop] cudaGLGetDevices found NO CUDA device for this GL context (%s).\n"
+            "          => OpenGL is NOT running on an NVIDIA GPU (check GL_RENDERER above:\n"
+            "             'llvmpipe'/'softpipe' = software, 'AMD'/'Intel'/Mesa = iGPU).\n"
+            "          Interop disabled, falling back to D2H. Fixes:\n"
+            "            * Optimus/PRIME laptop:  prime-run ./flip_cuda --interop\n"
+            "              or  __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia ./flip_cuda --interop\n"
+            "            * Make sure the NVIDIA GLX driver is installed/active (nvidia-utils).\n",
+            cudaGetErrorString(e));
         cudaGetLastError();
         g_useInterop = false;
     }
